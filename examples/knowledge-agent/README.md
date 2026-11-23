@@ -9,10 +9,14 @@ your machine with no API keys.
 - **`strands-weaviate`** connects the two to a [Strands](https://strandsagents.com) agent.
 
 ```
-content/*.md ──ingest.py──▶ Weaviate ◀──search── MemoryManager ──▶ Agent ──▶ Ollama chat model
-                              │  ▲
-                 embeds via Ollama  └── SnapshotSessionManager saves the conversation
+content/*.md ──ingest.py──▶ Weaviate ◀── search_handbook tool ──┐
+                              │  ▲                              Agent ──▶ Ollama chat model
+                 embeds via Ollama  └── saves the conversation ──┘   └── brew_ratio tool
 ```
+
+The agent has two tools: `search_handbook`, a hybrid search over the ingested content in
+Weaviate, and `brew_ratio`, an ordinary function that works out how much coffee to use for an
+amount of water.
 
 ## Run it
 
@@ -56,11 +60,37 @@ python search.py "can I send a bag back?"
 
 ```bash
 python chat.py "How long does cold brew concentrate keep?"
+python chat.py "How much coffee do I need for 600 grams of water with pour-over?"
 python chat.py          # interactive
 ```
 
+The first question is answered from the handbook, the second with the calculator.
+
 The conversation is saved in Weaviate, so the next run continues it. Set `SESSION_ID` to start
 a separate conversation.
+
+**6. See what happened.** Add `--debug` to print, for each turn, the setup, every tool call
+with its input and full result, the answer, why the model stopped, token usage, and what the
+session holds in Weaviate:
+
+```bash
+python chat.py --debug "And how long should it steep?"
+```
+
+```
+[debug] weaviate collection=KnowledgeAgent tenant=default session=demo
+[debug] tools=['search_handbook', 'brew_ratio']
+[debug] session restored with 4 earlier messages
+[debug] this turn added 4 messages:
+[debug]   user      text: And how long should it steep?
+[debug]   assistant tool call: search_handbook({"query": "French press steeping time"})
+[debug]   user      tool result [success]: # Brewing guide: French press Use 30 grams of ...
+[debug]   assistant text: The recommended steeping time for a French press is 4 minutes. ...
+[debug] stop_reason=end_turn tokens in=1184 out=65 total=1249
+[debug] session now holds 8 messages, saved under 1 keys:
+```
+
+Debug lines go to stderr, so `python chat.py --debug "..." 2>debug.log` keeps the answer clean.
 
 To ingest your own content, point `ingest.py` at a folder of markdown files:
 `python ingest.py path/to/docs`.
@@ -117,9 +147,22 @@ All optional, read from the environment:
   with Weaviate's Ollama vectorizer and multi-tenancy, and opens a `WeaviateStorage` for the
   tenant. `index_prefixes=["memory/"]` keeps session snapshots out of the search index.
 - [`ingest.py`](ingest.py) writes each section with `storage.write()` under `memory/handbook/`.
-- [`chat.py`](chat.py) gives that same storage to a `FileMemoryStore` (knowledge) and a
-  `SnapshotSessionManager` (conversation). The `MemoryManager` injects the best-matching
-  sections into each prompt.
+- [`chat.py`](chat.py) wraps `storage.search()` in the `search_handbook` tool and gives the
+  same storage to a `SnapshotSessionManager` for the conversation.
+- [`tools.py`](tools.py) holds `brew_ratio`, a plain `@tool` function with no Weaviate in it.
+
+## About small local models
+
+The default chat model, `llama3.2`, is a 3B model chosen because it is a small download. Two
+things follow from that:
+
+- Local models call a tool on almost every turn once any tool is available. That is why the
+  handbook is a tool here instead of text injected into the prompt by a `MemoryManager`: with
+  injection plus a calculator tool, the model called the calculator on unrelated questions
+  and then answered without the handbook.
+- Answers can still be imprecise or padded. `--debug` shows whether the right section was
+  retrieved, which is usually the case; a larger model (`CHAT_MODEL=llama3.1`, or any other
+  Strands model provider in `chat.py`) improves the wording.
 
 ## Clean up
 
