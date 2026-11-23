@@ -7,6 +7,7 @@ is what stops the fake from drifting away from real server behaviour.
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -100,12 +101,28 @@ def _project(stored: dict[str, Any], return_properties: list[str] | None, metada
 class FakeCollection:
     """In-memory stand-in for the collection calls WeaviateStorage makes."""
 
-    def __init__(self, name: str, properties: list[Any], has_vectorizer: bool) -> None:
+    def __init__(
+        self,
+        name: str,
+        properties: list[Any],
+        has_vectorizer: bool,
+        multi_tenant: bool = False,
+        auto_tenant_creation: bool = False,
+    ) -> None:
         self.name = name
         self.schema = properties
         self.has_vectorizer = has_vectorizer
-        self.objects: dict[str, dict[str, Any]] = {}
+        self.multi_tenant = multi_tenant
+        self.auto_tenant_creation = auto_tenant_creation
+        # Objects per tenant; a single-tenant collection keeps them under "".
+        self.shards: dict[str, dict[str, dict[str, Any]]] = {}
+        self.tenant: str | None = None
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.config = SimpleNamespace(get=self._config)
+        self.tenants = SimpleNamespace(get=lambda: {tenant: None for tenant in self.shards if tenant})
+        self._bind()
+
+    def _bind(self) -> None:
         self.data = SimpleNamespace(insert_many=self._insert_many, delete_by_id=self._delete_by_id)
         self.query = SimpleNamespace(
             fetch_object_by_id=self._fetch_object_by_id,
@@ -115,7 +132,30 @@ class FakeCollection:
             near_vector=self._near_vector,
             near_text=self._near_text,
         )
-        self.config = SimpleNamespace(get=self._config)
+
+    def with_tenant(self, tenant: str) -> FakeCollection:
+        view = copy.copy(self)
+        view.tenant = tenant
+        view._bind()
+        return view
+
+    def _shard(self, create: bool = False) -> dict[str, dict[str, Any]]:
+        """The current tenant's objects, failing the way Weaviate does for a bad tenant."""
+        if not self.multi_tenant:
+            if self.tenant is not None:
+                raise RuntimeError(f"class {self.name} has multi-tenancy disabled, but request was with tenant")
+            return self.shards.setdefault("", {})
+        if self.tenant is None:
+            raise RuntimeError(f"class {self.name} has multi-tenancy enabled, but request was without tenant")
+        if self.tenant not in self.shards:
+            if not (create and self.auto_tenant_creation):
+                raise RuntimeError(f'tenant not found: "{self.tenant}"')
+            self.shards[self.tenant] = {}
+        return self.shards[self.tenant]
+
+    @property
+    def objects(self) -> dict[str, dict[str, Any]]:
+        return self._shard()
 
     def _config(self) -> Any:
         vectorizer = Vectorizers.TEXT2VEC_WEAVIATE if self.has_vectorizer else Vectorizers.NONE
@@ -126,15 +166,18 @@ class FakeCollection:
             ],
             vector_config={"default": SimpleNamespace(vectorizer=SimpleNamespace(vectorizer=vectorizer))},
             vectorizer=None,
+            multi_tenancy_config=SimpleNamespace(enabled=self.multi_tenant),
         )
 
     def _insert_many(self, objects: list[Any]) -> Any:
+        # Like the server, the tenant is created before the objects are validated.
+        shard = self._shard(create=True)
         errors: dict[int, Any] = {}
         for index, item in enumerate(objects):
             if item.properties.get("data") == "":
                 errors[index] = SimpleNamespace(message="invalid blob property 'data': not a valid blob base64 string")
                 continue
-            self.objects[str(item.uuid)] = {"properties": dict(item.properties), "vector": item.vector}
+            shard[str(item.uuid)] = {"properties": dict(item.properties), "vector": item.vector}
         return SimpleNamespace(has_errors=bool(errors), errors=errors)
 
     def _delete_by_id(self, object_id: uuid.UUID) -> bool:
@@ -232,9 +275,17 @@ class FakeClient:
             delete=lambda name: self.store.pop(name, None),
         )
 
-    def _create(self, name: str, properties: list[Any], vector_config: Any = None) -> FakeCollection:
+    def _create(
+        self, name: str, properties: list[Any], vector_config: Any = None, multi_tenancy_config: Any = None
+    ) -> FakeCollection:
         # A test asks for a server-side vectorizer by passing the string "vectorizer".
-        self.store[name] = FakeCollection(name, properties, has_vectorizer=vector_config == "vectorizer")
+        self.store[name] = FakeCollection(
+            name,
+            properties,
+            has_vectorizer=vector_config == "vectorizer",
+            multi_tenant=bool(getattr(multi_tenancy_config, "enabled", False)),
+            auto_tenant_creation=bool(getattr(multi_tenancy_config, "autoTenantCreation", False)),
+        )
         return self.store[name]
 
 
@@ -297,3 +348,22 @@ def create_misconfigured_collection(client: Any, name: str) -> None:
         client.collections.create(name, properties=properties)
     else:
         client.collections.create(name, properties=properties, vector_config=Configure.Vectors.self_provided())
+
+
+def create_manual_tenant_collection(client: Any, name: str) -> None:
+    """Create a multi-tenant collection that does not create tenants automatically."""
+    from weaviate.classes.config import Configure
+
+    from strands_weaviate import WeaviateStorage
+
+    client.collections.create(
+        name,
+        properties=WeaviateStorage.collection_properties(),
+        vector_config=Configure.Vectors.self_provided(),
+        multi_tenancy_config=Configure.multi_tenancy(enabled=True),
+    )
+
+
+def tenant_names(client: Any, collection_name: str) -> list[str]:
+    """The tenants that exist in a collection, on either kind of client."""
+    return sorted(client.collections.get(collection_name).tenants.get())

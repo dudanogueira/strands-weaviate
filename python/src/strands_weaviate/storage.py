@@ -7,6 +7,7 @@ import base64
 import builtins
 import copy
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
@@ -39,6 +40,16 @@ _SEARCH_MODES: tuple[SearchMode, ...] = ("hybrid", "vector", "bm25")
 # size and falls back to a full cursor scan when the page comes back full.
 _LIST_FILTER_LIMIT = 1000
 
+# The tenant names Weaviate accepts.
+_TENANT_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _validate_tenant(tenant: str) -> str:
+    """Return the tenant name, or raise if Weaviate would reject it."""
+    if not _TENANT_NAME.fullmatch(tenant):
+        raise ValueError(f"tenant must be 1 to 64 characters of letters, digits, '_' or '-', got '{tenant}'")
+    return tenant
+
 
 class WeaviateStorage(Storage):
     """Persists bytes as objects in a Weaviate collection, with built-in search.
@@ -51,6 +62,10 @@ class WeaviateStorage(Storage):
     Vectors come from one of two places: pass an ``embedder`` to compute them in the SDK, or
     create the collection yourself with a Weaviate vectorizer (see
     :meth:`collection_properties`). With neither, search is BM25 only.
+
+    Pass ``tenant`` (or call :meth:`with_tenant`) to keep each tenant's objects in its own
+    shard of a multi-tenant collection. A tenant is created by the first value written to it,
+    never by a read, list, search or delete.
 
     Example:
         ```python
@@ -78,6 +93,7 @@ class WeaviateStorage(Storage):
         max_indexed_chars: int = 8000,
         create_collection: bool = True,
         vector_name: str | None = None,
+        tenant: str | None = None,
     ) -> None:
         """Initialize Weaviate storage.
 
@@ -101,11 +117,14 @@ class WeaviateStorage(Storage):
                 missing collection raises on first use.
             vector_name: Named vector to write to and search, for a collection that defines
                 more than one or names its vector something other than ``default``.
+            tenant: Tenant whose shard this storage reads and writes, in a multi-tenant
+                collection. When the storage creates the collection for a tenant, it enables
+                multi-tenancy; an existing single-tenant collection cannot be converted.
 
         Raises:
             StorageError: If ``client`` is an asynchronous client, or ``prefix`` is invalid.
-            ValueError: If ``search_mode``, ``alpha``, ``max_results`` or ``max_indexed_chars``
-                is out of range.
+            ValueError: If ``search_mode``, ``alpha``, ``max_results``, ``max_indexed_chars``
+                or ``tenant`` is out of range.
         """
         if isinstance(client, weaviate.WeaviateAsyncClient):
             raise StorageError(
@@ -134,16 +153,24 @@ class WeaviateStorage(Storage):
         self._max_indexed_chars = max_indexed_chars
         self._create_collection = create_collection
         self._vector_name = vector_name
-        # Set on instances returned by namespace(), so they share the root's collection state.
+        self._tenant = None if tenant is None else _validate_tenant(tenant)
+        # Set on instances returned by namespace() and with_tenant(), so they share the root's
+        # collection state.
         self._root: WeaviateStorage | None = None
         self._lock = threading.Lock()
         self._collection: Any = None
         self._has_vectorizer = False
+        self._multi_tenant = False
 
     @property
     def prefix(self) -> str:
         """The normalized key prefix (ending in ``/``), or ``""`` when none was configured."""
         return self._prefix
+
+    @property
+    def tenant(self) -> str | None:
+        """The tenant this storage is bound to, or ``None`` for a single-tenant collection."""
+        return self._tenant
 
     @staticmethod
     def collection_properties() -> builtins.list[Property]:
@@ -209,9 +236,15 @@ class WeaviateStorage(Storage):
 
         try:
             await asyncio.to_thread(self._write_sync, full_key, data, text, vector)
-        except StorageError:
-            raise
         except Exception as error:
+            if self._is_missing_tenant(error):
+                raise StorageError(
+                    f"Failed to write '{key}' to Weaviate: tenant '{self._tenant}' does not exist and the "
+                    "collection does not create tenants automatically; enable automatic tenant creation on "
+                    "the collection or create the tenant first"
+                ) from error
+            if isinstance(error, StorageError):
+                raise
             raise StorageError(f"Failed to write '{key}' to Weaviate ({len(data)} bytes)") from error
 
     async def read(self, key: str) -> bytes | None:
@@ -232,6 +265,8 @@ class WeaviateStorage(Storage):
         except StorageError:
             raise
         except Exception as error:
+            if self._is_missing_tenant(error):
+                return None
             raise StorageError(f"Failed to read '{key}' from Weaviate") from error
 
     async def delete(self, key: str) -> None:
@@ -249,6 +284,8 @@ class WeaviateStorage(Storage):
         except StorageError:
             raise
         except Exception as error:
+            if self._is_missing_tenant(error):
+                return
             raise StorageError(f"Failed to delete '{key}' from Weaviate") from error
 
     async def list(self, query: str = "") -> builtins.list[str]:
@@ -269,6 +306,8 @@ class WeaviateStorage(Storage):
         except StorageError:
             raise
         except Exception as error:
+            if self._is_missing_tenant(error):
+                return []
             raise StorageError(f"Failed to list keys with prefix '{query}' from Weaviate") from error
         logger.debug("prefix=<%s>, count=<%d> | listed keys", full_prefix, len(keys))
         return keys
@@ -297,6 +336,8 @@ class WeaviateStorage(Storage):
         except StorageError:
             raise
         except Exception as error:
+            if self._is_missing_tenant(error):
+                return []
             raise StorageError(f"Failed to search Weaviate collection '{self._collection_name}'") from error
 
     def namespace(self, prefix: str) -> WeaviateStorage:
@@ -323,6 +364,30 @@ class WeaviateStorage(Storage):
             scoped._namespaced = _NAMESPACED  # type: ignore[attr-defined]
         return scoped
 
+    def with_tenant(self, tenant: str) -> WeaviateStorage:
+        """Return a ``WeaviateStorage`` bound to ``tenant``, sharing this instance's client.
+
+        The view keeps this storage's prefix and configuration. Calling this makes no request
+        to Weaviate: the tenant comes into existence when the first value is written to it.
+
+        Args:
+            tenant: The tenant whose shard the returned storage reads and writes.
+
+        Returns:
+            A ``WeaviateStorage`` bound to the tenant.
+
+        Raises:
+            ValueError: If the tenant name is not one Weaviate accepts.
+        """
+        scoped = copy.copy(self)
+        scoped._tenant = _validate_tenant(tenant)
+        scoped._root = self._root or self
+        return scoped
+
+    def _is_missing_tenant(self, error: Exception) -> bool:
+        """Whether an error means this storage's tenant has not been created yet."""
+        return self._tenant is not None and "tenant not found" in str(error)
+
     def _indexable_text(self, full_key: str, data: bytes) -> str | None:
         """Return the text to make searchable for a value, or None if it is not indexed."""
         root = self._root or self
@@ -341,16 +406,31 @@ class WeaviateStorage(Storage):
         return text[: self._max_indexed_chars]
 
     def _get_collection(self) -> Any:
-        """Return the validated collection, creating it on first use (called via to_thread)."""
-        root = self._root or self
-        if root._collection is not None:
-            return root._collection
-        with root._lock:
-            if root._collection is None:
-                root._collection = root._open_collection()
-        return root._collection
+        """Return the validated collection handle for this storage's tenant (called via to_thread).
 
-    def _open_collection(self) -> Any:
+        The collection is created on first use. A tenant is not: the handle only names it.
+        """
+        root = self._root or self
+        if root._collection is None:
+            with root._lock:
+                if root._collection is None:
+                    root._collection = root._open_collection(multi_tenant=self._tenant is not None)
+
+        name = self._collection_name
+        if self._tenant is None:
+            if root._multi_tenant:
+                raise StorageError(
+                    f"Weaviate collection '{name}' is multi-tenant; pass tenant=... or use with_tenant()"
+                )
+            return root._collection
+        if not root._multi_tenant:
+            raise StorageError(
+                f"Weaviate collection '{name}' is not multi-tenant, so tenant '{self._tenant}' cannot be used; "
+                "multi-tenancy can only be enabled when a collection is created, so use a new collection_name"
+            )
+        return root._collection.with_tenant(self._tenant)
+
+    def _open_collection(self, multi_tenant: bool) -> Any:
         """Create the collection if needed and check that its schema fits this backend."""
         name = self._collection_name
         collections = self._client.collections
@@ -362,6 +442,10 @@ class WeaviateStorage(Storage):
                     name,
                     properties=self.collection_properties(),
                     vector_config=Configure.Vectors.self_provided(name=self._vector_name or "default"),
+                    # Tenants are created by the first object inserted into them, never up front.
+                    multi_tenancy_config=Configure.multi_tenancy(
+                        enabled=multi_tenant, auto_tenant_creation=multi_tenant, auto_tenant_activation=multi_tenant
+                    ),
                 )
                 logger.debug("collection=<%s> | created collection", name)
             except Exception:
@@ -389,6 +473,7 @@ class WeaviateStorage(Storage):
         self._has_vectorizer = any(
             vector.vectorizer.vectorizer != Vectorizers.NONE for vector in named_vectors.values()
         ) or config.vectorizer not in (None, Vectorizers.NONE)
+        self._multi_tenant = bool(config.multi_tenancy_config.enabled)
         return collection
 
     def _resolve_mode(self) -> SearchMode:

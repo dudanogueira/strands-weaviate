@@ -9,7 +9,14 @@ from unittest.mock import MagicMock
 
 import pytest
 import weaviate
-from conftest import FakeClient, ScriptedModel, create_misconfigured_collection, stored_object
+from conftest import (
+    FakeClient,
+    ScriptedModel,
+    create_manual_tenant_collection,
+    create_misconfigured_collection,
+    stored_object,
+    tenant_names,
+)
 from strands import Agent
 from strands.memory import MemoryManager
 from strands.session import SnapshotSessionManager
@@ -361,6 +368,136 @@ class TestSdkConsumers:
 
         texts = [block["text"] for message in second.messages for block in message["content"] if "text" in block]
         assert texts == ["my favourite colour is teal", "noted", "and my favourite number is seven", "noted"]
+
+
+class TestMultiTenancy:
+    @pytest.fixture
+    def acme(self, client, collection_name):
+        return WeaviateStorage(client, collection_name=collection_name, tenant="acme")
+
+    async def test_tenants_are_isolated(self, acme):
+        globex = acme.with_tenant("globex")
+        await acme.write("memory/notes.md", b"acme prefers oat milk")
+        await globex.write("memory/notes.md", b"globex prefers green tea")
+        await globex.write("memory/extra.md", b"globex only")
+
+        assert await acme.read("memory/notes.md") == b"acme prefers oat milk"
+        assert await globex.read("memory/notes.md") == b"globex prefers green tea"
+        assert await acme.list() == ["memory/notes.md"]
+        assert await globex.list() == ["memory/extra.md", "memory/notes.md"]
+        assert [result.data for result in await acme.search("prefers")] == [b"acme prefers oat milk"]
+        assert await acme.search("globex") == []
+
+    async def test_delete_only_affects_own_tenant(self, acme):
+        globex = acme.with_tenant("globex")
+        await acme.write("key", b"acme")
+        await globex.write("key", b"globex")
+
+        await acme.delete("key")
+
+        assert await acme.read("key") is None
+        assert await globex.read("key") == b"globex"
+
+    async def test_with_tenant_and_namespace_compose(self, acme):
+        scoped = acme.namespace("memory").with_tenant("globex").namespace("user")
+
+        await scoped.write("notes.md", b"value")
+
+        assert (acme.tenant, scoped.tenant, scoped.prefix) == ("acme", "globex", "memory/user/")
+        assert await acme.with_tenant("globex").list() == ["memory/user/notes.md"]
+        assert await acme.list() == []
+        assert scoped._root is acme
+
+    async def test_no_tenant_is_created_without_data(self, client, collection_name, embedder):
+        storage = WeaviateStorage(client, collection_name=collection_name, tenant="acme", embedder=embedder)
+        ghost = storage.with_tenant("ghost").namespace("memory")
+        assert not client.collections.exists(collection_name)
+
+        assert await ghost.read("notes.md") is None
+        assert await ghost.list() == []
+        assert await ghost.search("anything") == []
+        await ghost.delete("notes.md")
+        assert await storage.read("notes.md") is None
+        embedder.error = RuntimeError("embedder down")
+        with pytest.raises(StorageError, match="Failed to embed"):
+            await ghost.write("notes.md", b"never stored")
+        with pytest.raises(StorageError):
+            await ghost.write("../escape", b"never stored")
+
+        assert client.collections.exists(collection_name)
+        assert tenant_names(client, collection_name) == []
+
+    async def test_first_write_creates_only_that_tenant(self, acme, client, collection_name):
+        acme.with_tenant("globex")
+        await acme.list()
+        assert tenant_names(client, collection_name) == []
+
+        await acme.write("key", b"value")
+
+        assert tenant_names(client, collection_name) == ["acme"]
+
+    async def test_empty_value_is_data(self, acme, client, collection_name):
+        await acme.write("empty", b"")
+
+        assert await acme.read("empty") == b""
+        assert tenant_names(client, collection_name) == ["acme"]
+
+    async def test_tenant_on_single_tenant_collection_raises(self, client, collection_name):
+        await WeaviateStorage(client, collection_name=collection_name).write("key", b"value")
+        tenant = WeaviateStorage(client, collection_name=collection_name, tenant="acme")
+
+        for operation in (tenant.read("key"), tenant.write("key", b"value"), tenant.list(), tenant.search("value")):
+            with pytest.raises(StorageError, match="is not multi-tenant"):
+                await operation
+
+    async def test_missing_tenant_on_multi_tenant_collection_raises(self, acme, client, collection_name):
+        await acme.write("key", b"value")
+        untenanted = WeaviateStorage(client, collection_name=collection_name)
+
+        for operation in (untenanted.read("key"), untenanted.write("key", b"value"), untenanted.list()):
+            with pytest.raises(StorageError, match="is multi-tenant; pass tenant"):
+                await operation
+
+    async def test_tenantless_root_serves_tenants_through_with_tenant(self, client, collection_name):
+        root = WeaviateStorage(client, collection_name=collection_name)
+
+        await root.with_tenant("acme").write("key", b"value")
+
+        assert await root.with_tenant("acme").read("key") == b"value"
+        assert tenant_names(client, collection_name) == ["acme"]
+
+    async def test_write_fails_clearly_without_automatic_tenant_creation(self, client, collection_name):
+        create_manual_tenant_collection(client, collection_name)
+        storage = WeaviateStorage(client, collection_name=collection_name, tenant="acme")
+
+        with pytest.raises(StorageError, match="does not create tenants automatically"):
+            await storage.write("key", b"value")
+
+        assert await storage.read("key") is None
+        assert tenant_names(client, collection_name) == []
+
+    async def test_file_memory_stores_do_not_share_memories_across_tenants(self, acme):
+        acme_store = FileMemoryStore(name="user", storage=acme)
+        globex_store = FileMemoryStore(name="user", storage=acme.with_tenant("globex"))
+        await acme_store.add("# Drinks\nthe user drinks oat milk coffee")
+
+        assert [entry.metadata["path"] for entry in await acme_store.search("coffee")] == ["drinks.md"]
+        assert await globex_store.search("coffee") == []
+
+    @pytest.mark.parametrize("tenant", ["", "has space", "a/b", "café", "x" * 65])
+    def test_rejects_invalid_tenant_names(self, tenant):
+        with pytest.raises(ValueError, match="tenant must be"):
+            WeaviateStorage(FakeClient(), tenant=tenant)
+        with pytest.raises(ValueError, match="tenant must be"):
+            WeaviateStorage(FakeClient()).with_tenant(tenant)
+
+    @pytest.mark.parametrize("tenant", ["a", "ok_Name-1", "x" * 64])
+    async def test_accepts_valid_tenant_names(self, client, collection_name, tenant):
+        storage = WeaviateStorage(client, collection_name=collection_name, tenant=tenant)
+
+        await storage.write("key", b"value")
+
+        assert tenant_names(client, collection_name) == [tenant]
 
 
 class TestConfiguration:

@@ -120,10 +120,55 @@ storage = WeaviateStorage(client, embedder=embedder, index_prefixes=["memory/"])
 | `max_indexed_chars` | `8000` | Longest text indexed per value |
 | `create_collection` | `True` | Create the collection when missing |
 | `vector_name` | `None` | Named vector to write and search |
+| `tenant` | `None` | Tenant to read and write, in a multi-tenant collection |
 
-`storage.namespace("tenant-a")` returns a view scoped to a key prefix that shares the client
+`storage.namespace("memory")` returns a view scoped to a key prefix that shares the client
 and collection. Its searches are filtered by prefix inside Weaviate, so `max_results` applies
 within the namespace.
+
+## Multi-tenancy
+
+Pass `tenant` to keep each tenant's keys, text and vectors in its own shard of a
+[multi-tenant collection](https://docs.weaviate.io/weaviate/manage-collections/multi-tenancy):
+
+```python
+storage = WeaviateStorage(client, collection_name="AgentData", tenant="acme")
+
+await storage.write("memory/notes.md", b"Acme prefers concise answers.")
+await storage.with_tenant("globex").read("memory/notes.md")   # None: a different shard
+```
+
+`with_tenant(name)` returns a view for another tenant that shares the client, so one storage
+can serve every user: `FileMemoryStore(name="user", storage=storage.with_tenant(user_id))`.
+`namespace()` still scopes by key prefix inside a tenant.
+
+- **Tenants are created by data, not by access.** The first value written to a tenant creates
+  it. `read`, `list`, `search` and `delete` on a tenant that does not exist return `None`,
+  `[]`, `[]` and nothing, without creating it; so do `with_tenant()` and writes that fail
+  before reaching Weaviate (invalid key, embedder error). The one exception: if Weaviate
+  itself rejects the first object written to a new tenant, the tenant is left behind empty.
+- **Tenants are never deleted.** Removing the last key leaves an empty tenant. Deactivating,
+  offloading and deleting tenants is done with the Weaviate client.
+- **Multi-tenancy is fixed when the collection is created.** The storage enables it when it
+  creates the collection for a storage that has a `tenant`. A single-tenant collection cannot
+  be converted: use a new `collection_name`. Mixing the two raises `StorageError`.
+- **Tenant names** are 1 to 64 letters, digits, `_` or `-`.
+
+To attach a Weaviate vectorizer, create the multi-tenant collection yourself with automatic
+tenant creation enabled:
+
+```python
+client.collections.create(
+    "AgentData",
+    properties=WeaviateStorage.collection_properties(),
+    vector_config=Configure.Vectors.text2vec_weaviate(
+        source_properties=["text"], vectorize_collection_name=False
+    ),
+    multi_tenancy_config=Configure.multi_tenancy(
+        enabled=True, auto_tenant_creation=True, auto_tenant_activation=True
+    ),
+)
+```
 
 ## Limits
 
@@ -137,8 +182,9 @@ within the namespace.
   but not searchable.
 - **BM25 is lexical.** Without a vector source, `drink` does not match `drinks`.
 - **Listing.** `list(prefix)` is one filtered query when fewer than 1000 keys match, and a
-  scan of the whole collection otherwise.
-- **Namespaces are not a security boundary.** Every view shares one collection and credential.
+  scan of the whole collection (or of the tenant's shard) otherwise.
+- **Namespaces are not an isolation boundary.** They share one index. Use `tenant` to give
+  each tenant its own shard; every view still shares one credential.
 - **Replicated clusters.** The SDK expects read-after-write; this backend uses the client's
   default consistency level.
 - **Concurrent memory writers.** `FileMemoryStore.add` merges in-process only, so two
