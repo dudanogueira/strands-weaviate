@@ -1,0 +1,3 @@
+# The storage backend, installed from this repository until it is published to PyPI.
+-e ../../python
+strands-agents[ollama]>=1.64.0

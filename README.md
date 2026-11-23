@@ -31,6 +31,11 @@ npm install /path/to/strands-weaviate/typescript/strands-weaviate-0.0.0.tgz @str
 
 See each package's README for details.
 
+## Example
+
+[examples/knowledge-agent](examples/knowledge-agent/README.md) starts Weaviate and Ollama with Docker
+Compose, ingests a folder of markdown, and runs an agent that answers from it, with no API keys.
+
 ## Local Weaviate
 
 ```bash
