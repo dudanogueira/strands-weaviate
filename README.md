@@ -7,9 +7,9 @@ one Weaviate collection, with built-in hybrid (BM25 + vector) search.
 | Language | Package | Status | Docs |
 |---|---|---|---|
 | Python | `strands-weaviate` (PyPI) | Implemented, not yet published | [python/](python/README.md) |
-| TypeScript | `strands-weaviate` (npm) | Not implemented yet (template skeleton) | [typescript/](typescript/README.md) |
+| TypeScript | `strands-weaviate` (npm) | Implemented, not yet published | [typescript/](typescript/README.md) |
 
-The TypeScript package is planned to use the same collection schema and object ids, so one
+Both packages use the same collection schema and derive the same object id for a key, so one
 collection can be shared across the two SDKs.
 
 ## Local Weaviate

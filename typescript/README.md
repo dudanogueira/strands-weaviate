@@ -1,216 +1,177 @@
-<div align="center">
-  <div>
-    <a href="https://strandsagents.com">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="https://strandsagents.com/latest/assets/wordmark-github-dark.svg">
-        <img src="https://strandsagents.com/latest/assets/wordmark-github-light.svg" alt="Strands" width="320">
-      </picture>
-    </a>
-  </div>
-  <h1>Strands Agents Extension Template — TypeScript</h1>
-  <h2>Build and publish custom TypeScript components for Strands Agents.</h2>
-  <p>
-    <a href="https://strandsagents.com/">Documentation</a> ◆
-    <a href="https://github.com/strands-agents/samples">Samples</a> ◆
-    <a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-cli">CLI</a> ◆
-    <a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-mcp">MCP Server</a>
-    <br>
-    Harness (<a href="https://github.com/strands-agents/harness-sdk/tree/main/harness-py">Python</a>, <a href="https://github.com/strands-agents/harness-sdk/tree/main/harness-ts">TypeScript</a>) ◆
-    SDK (<a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-py">Python</a>, <a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-ts">TypeScript</a>) ◆
-    <a href="https://github.com/strands-agents/box">Box</a> ◆
-    <a href="https://github.com/strands-agents/shell">Shell</a> ◆
-    <a href="https://github.com/strands-agents/evals">Evals</a> ◆
-    <a href="https://github.com/strands-labs">Labs</a>
-  </p>
-</div>
+# strands-weaviate (TypeScript)
 
-This template helps you build and publish custom components for [Strands Agents](https://github.com/strands-agents/harness-sdk/tree/main/strands-ts). Whether you're creating a new tool, model provider, or storage backend, this directory gives you a starting point with the right structure and conventions.
+A [Weaviate](https://weaviate.io) `Storage` backend for
+[Strands Agents](https://strandsagents.com). One collection holds session snapshots, offloaded
+context and agent memory, and `search()` runs a Weaviate hybrid (BM25 + vector) query instead
+of a keyword scan.
 
-> This is the TypeScript half of the [extension-template](../README.md) monorepo. For the Python equivalent, see [`../python/`](../python/).
+Each key is one Weaviate object carrying the raw bytes, the searchable text and the vector, so
+an overwrite or delete can never leave a stale search entry behind.
 
-## Getting started
-
-### 1. Create your repository
-
-Click "Use this template" on GitHub to create your own repository. Then clone it locally and switch into this directory:
+## Install
 
 ```bash
-git clone https://github.com/yourusername/your-repo-name
-cd your-repo-name/typescript
+npm install strands-weaviate @strands-agents/sdk weaviate-client
 ```
 
-### 2. Run the setup script
+Requires Node.js 22+, `@strands-agents/sdk` 1.25+ and `weaviate-client` 3.15.3+ (both peer
+dependencies).
 
-The setup script customizes the template for your project. It renames files, updates imports, configures `package.json`, and removes components you don't need.
+## Quickstart
+
+```ts
+import weaviate from 'weaviate-client'
+import { WeaviateStorage } from 'strands-weaviate'
+
+const client = await weaviate.connectToLocal() // or weaviate.connectToWeaviateCloud(...)
+const storage = new WeaviateStorage(client)
+
+await storage.write('memory/notes.md', new TextEncoder().encode('The user prefers concise answers.'))
+await storage.read('memory/notes.md') // Uint8Array
+await storage.list('memory/') // ['memory/notes.md']
+await storage.search('concise answers') // [{ key: 'memory/notes.md', score, data }]
+```
+
+You own the client: `WeaviateStorage` never connects or closes it. The collection
+(`StrandsStorage` by default) is created on first use.
+
+### Agent memory
+
+```ts
+import { Agent, MemoryManager } from '@strands-agents/sdk'
+import { FileMemoryStore } from '@strands-agents/sdk/vended-memory-stores/file-memory-store'
+
+const memoryStore = new FileMemoryStore({ name: 'user', storage })
+const agent = new Agent({ memoryManager: new MemoryManager({ stores: [memoryStore] }) })
+```
+
+Recall goes through `storage.search()`, and results carry their content, so the store does not
+re-read each hit.
+
+### Sessions
+
+```ts
+import { Agent, SessionManager } from '@strands-agents/sdk'
+
+const agent = new Agent({ sessionManager: new SessionManager({ sessionId: 'chat-42', storage }) })
+```
+
+## Search modes
+
+| Vectors come from | How to set it up | Default search |
+|---|---|---|
+| Nothing | `new WeaviateStorage(client)` | BM25 |
+| An SDK embedder | `new WeaviateStorage(client, { embedder })` | Hybrid |
+| A Weaviate vectorizer | Create the collection yourself (below) | Hybrid |
+
+Set `searchMode` to `'hybrid'`, `'vector'` or `'bm25'` to override, and `alpha` (0 = BM25 only,
+1 = vector only) to weight hybrid search. Scores are higher-is-better and are not comparable
+across modes.
+
+With an SDK embedder:
+
+```ts
+import { BedrockEmbedder } from '@strands-agents/sdk/storage/embeddings/bedrock'
+
+const storage = new WeaviateStorage(client, { embedder: new BedrockEmbedder() })
+```
+
+With a Weaviate vectorizer, create the collection from the backend's property definitions and
+vectorize only `text`:
+
+```ts
+import { configure } from 'weaviate-client'
+
+await client.collections.create({
+  name: 'StrandsStorage',
+  properties: WeaviateStorage.collectionProperties(),
+  vectorizers: configure.vectors.text2VecWeaviate({
+    sourceProperties: ['text'],
+    vectorizeCollectionName: false,
+  }),
+})
+const storage = new WeaviateStorage(client)
+```
+
+## What gets indexed
+
+A value is searchable when it is non-empty UTF-8 text without NUL bytes. Everything else
+(images, framed context-offloader payloads) is stored and readable but never embedded.
+
+Session snapshots are JSON text, so a storage shared by sessions and memory would embed every
+snapshot on every turn. Restrict indexing to the keys you search:
+
+```ts
+const storage = new WeaviateStorage(client, { embedder, indexPrefixes: ['memory/'] })
+```
+
+## Configuration
+
+`new WeaviateStorage(client, config?)`
+
+| Option | Default | Purpose |
+|---|---|---|
+| `collectionName` | `'StrandsStorage'` | Collection that holds the objects |
+| `prefix` | `''` | Key prefix for everything this storage reads and writes |
+| `embedder` | none | SDK `Embedder` used for values and queries |
+| `searchMode` | automatic | `'hybrid'`, `'vector'` or `'bm25'` |
+| `alpha` | `0.5` | Hybrid weighting |
+| `maxResults` | `10` | Results returned by `search()` |
+| `indexPrefixes` | all text | Key prefixes, relative to `prefix`, to make searchable |
+| `maxIndexedChars` | `8000` | Longest text indexed per value |
+| `createCollection` | `true` | Create the collection when missing |
+| `vectorName` | none | Named vector to write and search |
+
+`storage.namespace('tenant-a')` returns a view scoped to a key prefix that shares the client
+and collection. Its searches are filtered by prefix inside Weaviate, so `maxResults` applies
+within the namespace.
+
+## Python parity
+
+The [Python package](../python/README.md) uses the same collection schema and derives the same
+object id for a key, so both SDKs can read and write one collection. Option names are the
+snake_case forms of the ones above (`collection_name`, `search_mode`, `index_prefixes`, ...).
+
+## Limits
+
+- **Node.js only.** The Weaviate client uses gRPC and does not run in the browser.
+- **Value size.** A value travels base64-encoded in a single gRPC message, so very large
+  values are rejected by Weaviate (measured with the Python package against a default
+  Weaviate 1.40 server: 64 MB stored, 90 MB rejected). Use an object store for media-heavy
+  sessions.
+- **One vector per key.** Values are not chunked. Text beyond `maxIndexedChars` is readable
+  but not searchable.
+- **BM25 is lexical.** Without a vector source, `drink` does not match `drinks`.
+- **Listing.** `list(prefix)` is one filtered query when fewer than 1000 keys match, and a
+  scan of the whole collection otherwise.
+- **Namespaces are not a security boundary.** Every view shares one collection and credential.
+- **Replicated clusters.** The SDK expects read-after-write; this backend uses the client's
+  default consistency level.
+- **Concurrent memory writers.** `FileMemoryStore.add` merges in-process only, so two
+  processes appending to the same entry can lose an update (true of every backend).
+
+## Development
 
 ```bash
 npm install
-npm run setup
+npm run check        # format, lint, type-check, unit tests
 ```
 
-You'll be prompted for:
-
-- **Package name** — A short identifier like `amazon`, `slack`, or `redis`. This becomes your module name (`strands-amazon`) and npm package name (`strands-amazon`).
-- **Components** — Which extension points you want to include (tool, model, etc.).
-- **Author info** — Your name, email, and GitHub username for `package.json`.
-- **Description** — A one-line description of your package.
-
-### 3. Install dependencies
-
-After the setup script finishes, install peer + dev dependencies:
+The unit tests run against an in-memory fake. The same tests also run against a real Weaviate:
 
 ```bash
-npm install
+docker compose -f ../docker-compose.yml up -d
+npm run test:integ
 ```
 
-## What's in this template
+Set `WEAVIATE_HTTP_PORT` and `WEAVIATE_GRPC_PORT` when Weaviate is not on 8080/50051.
 
-The template includes skeleton implementations for all major Strands extension points.
+## Publishing
 
-| File | Component | Purpose |
-|------|-----------|---------|
-| `src/tool.ts` | Tool | Add capabilities to agents using the `tool` factory |
-| `src/model.ts` | Model provider | Integrate custom LLM APIs |
-| `src/plugin.ts` | Plugin | Extend agent behavior with hooks and tools in a composable package |
-| `src/intervention.ts` | Intervention | Add composable control handlers for authorization, guardrails, and steering |
-| `src/conversation-manager.ts` | Conversation manager | Control context window and message history |
-| `src/memory-store.ts` | Memory store | Give agents cross-session knowledge via a search backend |
-| `src/storage.ts` | Storage | Persist sessions, offloaded context, and other data under string keys |
-| `src/decision-model.ts` | Decision model | Answer closed questions over agent state through a decision API |
-
-The setup script will remove components you don't select, so you only keep what you need.
-
-## Implementing your components
-
-Each file contains a minimal skeleton. Here's what to implement:
-
-### Tools
-
-Tools let agents interact with external systems and perform actions. Implement your callback inside `src/tool.ts`. Use a Zod schema for typed/validated input or a JSON schema for untyped input.
-
-- [Creating custom tools](https://strandsagents.com/docs/user-guide/sdk/tools/custom-tools/) - Documentation
-- [sleep](https://github.com/strands-agents/harness-sdk/tree/main/strands-ts/src/vended-tools/sleep) - Simple tool with a configuration factory and cancellation handling
-- [http-request](https://github.com/strands-agents/harness-sdk/tree/main/strands-ts/src/vended-tools/http-request) - Tool with a Zod input schema and typed output
-- See the `tool` factory in `@strands-agents/sdk` for full options.
-
-### Plugins
-
-Plugins provide a composable way to extend agent behavior by bundling hooks and tools into a single package. Implement `initAgent` to register hooks and `getTools` to contribute tools.
-
-- [Plugins](https://strandsagents.com/docs/user-guide/sdk/plugins/) - Documentation
-- The SDK's `SessionManager` and `vended-plugins/skills` are good worked examples.
-
-### Interventions
-
-Intervention handlers provide composable control layers for agents. Override lifecycle methods (like `beforeToolCall`) to intercept events and return typed decisions: proceed, deny, guide, confirm, or transform. Use them for authorization checks, guardrails, and human-in-the-loop approval.
-
-- [Interventions](https://strandsagents.com/docs/user-guide/sdk/agents/interventions/) - Documentation
-- The SDK's `vended-interventions` (Cedar authorization, HITL, steering) are worked examples.
-
-### Model providers
-
-Model providers connect agents to LLM APIs by extending the `Model` base class. Implement `stream()` to translate between Strands stream events and your provider's wire protocol.
-
-- The SDK's `BedrockModel` (`@strands-agents/sdk/models/bedrock`) is the canonical reference implementation.
-
-### Decision models
-
-Decision models answer closed questions (yes/no or one of a fixed set of choices) over agent state by extending the `DecisionModel` base class. Implement `_ask()` to call your provider's decision API and return one answer per question. The base class validates questions and records tracing and usage.
-
-- [Custom decision models](https://strandsagents.com/docs/user-guide/sdk/decision-models/models/#custom-decision-models) covers the contract `_ask()` must meet.
-- The SDK's [`TypeSafeDecisionModel`](https://github.com/strands-agents/harness-sdk/blob/main/strands-ts/src/decisions/typesafe-decision-model.ts) is a worked example.
-
-### Storage
-
-Storage backends persist raw bytes under string keys. Implement `write()`, `read()`, `delete()`, and `list()`. The SDK's `SessionManager` saves sessions through a `Storage`, so implementing one is how you add a session backend such as S3, Redis, or a custom database. Context offloading uses the same interface.
-
-- [Session management](https://strandsagents.com/docs/user-guide/sdk/agents/session-management/) - Documentation
-- [Local file storage](https://github.com/strands-agents/harness-sdk/blob/main/strands-ts/src/storage/local-file-storage.ts) - Implementation example
-
-### Conversation managers
-
-Conversation managers control the context window and how message history grows over time. Override `reduce()` to mutate `agent.messages` in place when the context window is at risk.
-
-- The SDK ships `SlidingWindowConversationManager` and `SummarizingConversationManager` as references.
-
-### Memory stores
-
-Memory stores give agents cross-session knowledge. A `MemoryManager` searches one or more stores to recall facts and, for writable stores, writes new ones. Implement `search()` to back memory with your own store — a vector database, a managed search service, or any system that retrieves entries by relevance. For writes, implement whichever sinks fit your backend. `add()` for adding an extracted memory. For discrete-entry backend (e.g. a vector DB), only implement this method. `addMessages()` for ingesting raw conversation turns to extract server-side. Only implement this for backends that support server side extraction. Store identity and behavior (`name`, `description`, `maxSearchResults`, `writable`, `extraction`) come from config via `MemoryStoreConfig`, matching the SDK's own stores; extend `TemplateMemoryStoreConfig` with any backend-specific fields.
-
-- The SDK's `BedrockKnowledgeBaseStore` is a worked `MemoryStore` implementation.
-
-## Testing
-
-Run all checks (format, lint, type-check, test):
-
-```bash
-npm run check
-```
-
-Or run them individually:
-
-```bash
-npm test            # Run tests with vitest
-npm run lint        # Run ESLint
-npm run type-check  # Run tsc --noEmit
-npm run format      # Format with Prettier
-```
-
-## Publishing to npm
-
-You can publish manually or through GitHub Actions.
-
-### Option 1: GitHub release (recommended)
-
-The included workflow automatically publishes to npm when you create a GitHub release with a tag prefixed `typescript-v` (e.g. `typescript-v0.1.0`). The prefix lets the monorepo distinguish python and typescript releases.
-
-1. Create an environment named `npm` in your GitHub repository (Settings → Environments). Add required reviewers if you want publishes gated behind approval.
-2. Add an `NPM_TOKEN` secret to that environment (Account Settings → Access Tokens on npm, scope: Automation).
-3. Bump the `version` in `package.json` (or use `npm version`) — the workflow publishes the version that's currently in `package.json`.
-4. Create a release on GitHub with a tag like `typescript-v0.1.0`.
-5. The workflow runs checks, builds, and publishes.
-
-**Note:** If you create a release without configuring the environment and token, the workflow will fail. Set this up before your first release.
-
-### Option 2: Manual publish
-
-```bash
-npm run check         # format, lint, type-check, test
-npm run build         # tsc -> dist/
-npm publish --access public
-```
-
-## Naming conventions
-
-Follow these conventions so your package fits the Strands ecosystem:
-
-| Item | Convention | Example |
-|------|------------|---------|
-| npm package | `strands-{name}` | `strands-amazon` |
-| Model class | `{Name}Model` | `AmazonModel` |
-| Decision model class | `{Name}DecisionModel` | `TypeSafeDecisionModel` |
-| Plugin class | `{Name}Plugin` | `AmazonPlugin` |
-| Intervention class | `{Name}Intervention` | `CedarIntervention` |
-| Storage class | `{Name}Storage` | `RedisStorage` |
-| Conversation manager | `{Name}ConversationManager` | `SummarizingConversationManager` |
-| Memory store | `{Name}MemoryStore` | `RedisMemoryStore` |
-| Tool factory output | `{descriptiveName}` (camelCase) | `searchWeb`, `sendEmail` |
-
-## Get featured
-
-Help others discover your package by adding the `strands-agents` topic to your GitHub repository. You can also submit your package to be featured on the Strands website. See [Get Featured](https://strandsagents.com/docs/community/get-featured/) for details.
-
-## Resources
-
-- [Strands Agents documentation](https://strandsagents.com/)
-- [TypeScript SDK](https://github.com/strands-agents/harness-sdk/tree/main/strands-ts)
-- [SDK vended tools](https://github.com/strands-agents/harness-sdk/tree/main/strands-ts/src/vended-tools)
-- [Community packages](https://strandsagents.com/docs/community/community-packages/)
-
-## Security
-
-See [CONTRIBUTING](../CONTRIBUTING.md#security-issue-notifications) for more information.
+Bump `version` in `package.json`, then create a GitHub release tagged `typescript-v<version>`.
+The `publish-typescript.yml` workflow runs the checks, builds, and publishes with the
+`NPM_TOKEN` secret of the `npm` environment, which must be configured first.
 
 ## License
 
-BSD 3-Clause — see [LICENSE](../LICENSE) for details.
+Apache-2.0. See [LICENSE](LICENSE).
