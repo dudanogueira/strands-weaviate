@@ -390,6 +390,141 @@ describe.each(backends)('WeaviateStorage on $name', ({ connect }) => {
     })
   })
 
+  describe('multi-tenancy', () => {
+    let acme: WeaviateStorage
+    const tenantNames = async () => Object.keys(await client.collections.use(collectionName).tenants.get()).sort()
+
+    beforeEach(() => {
+      acme = new WeaviateStorage(client, { collectionName, tenant: 'acme' })
+    })
+
+    it('isolates tenants', async () => {
+      const globex = acme.withTenant('globex')
+      await acme.write('memory/notes.md', encode('acme prefers oat milk'))
+      await globex.write('memory/notes.md', encode('globex prefers green tea'))
+      await globex.write('memory/extra.md', encode('globex only'))
+
+      expect(decode(await acme.read('memory/notes.md'))).toBe('acme prefers oat milk')
+      expect(decode(await globex.read('memory/notes.md'))).toBe('globex prefers green tea')
+      expect(await acme.list('')).toStrictEqual(['memory/notes.md'])
+      expect(await globex.list('')).toStrictEqual(['memory/extra.md', 'memory/notes.md'])
+      expect((await acme.search('prefers')).map((result) => decode(result.data))).toStrictEqual([
+        'acme prefers oat milk',
+      ])
+      expect(await acme.search('globex')).toStrictEqual([])
+    })
+
+    it('deletes only from its own tenant', async () => {
+      const globex = acme.withTenant('globex')
+      await acme.write('key', encode('acme'))
+      await globex.write('key', encode('globex'))
+
+      await acme.delete('key')
+
+      expect(await acme.read('key')).toBeNull()
+      expect(decode(await globex.read('key'))).toBe('globex')
+    })
+
+    it('composes withTenant and namespace', async () => {
+      const scoped = acme.namespace('memory').withTenant('globex').namespace('user')
+
+      await scoped.write('notes.md', encode('value'))
+
+      expect([acme.tenant, scoped.tenant, scoped.prefix]).toStrictEqual(['acme', 'globex', 'memory/user/'])
+      expect(NAMESPACED in acme.namespace('memory').withTenant('globex')).toBe(true)
+      expect(NAMESPACED in acme.withTenant('globex')).toBe(false)
+      expect(await acme.withTenant('globex').list('')).toStrictEqual(['memory/user/notes.md'])
+      expect(await acme.list('')).toStrictEqual([])
+    })
+
+    it('creates no tenant without data', async () => {
+      const storage = new WeaviateStorage(client, { collectionName, tenant: 'acme', embedder })
+      const ghost = storage.withTenant('ghost').namespace('memory')
+      expect(await client.collections.exists(collectionName)).toBe(false)
+
+      expect(await ghost.read('notes.md')).toBeNull()
+      expect(await ghost.list('')).toStrictEqual([])
+      expect(await ghost.search('anything')).toStrictEqual([])
+      await expect(ghost.delete('notes.md')).resolves.toBeUndefined()
+      expect(await storage.read('notes.md')).toBeNull()
+      embedder.error = new Error('embedder down')
+      await expect(ghost.write('notes.md', encode('never stored'))).rejects.toThrow(/Failed to embed/)
+      await expect(ghost.write('../escape', encode('never stored'))).rejects.toThrow(StorageError)
+
+      expect(await client.collections.exists(collectionName)).toBe(true)
+      expect(await tenantNames()).toStrictEqual([])
+    })
+
+    it('creates only the written tenant on first write', async () => {
+      acme.withTenant('globex')
+      await acme.list('')
+      expect(await tenantNames()).toStrictEqual([])
+
+      await acme.write('key', encode('value'))
+
+      expect(await tenantNames()).toStrictEqual(['acme'])
+    })
+
+    it('treats an empty value as data', async () => {
+      await acme.write('empty', new Uint8Array(0))
+
+      expect(await acme.read('empty')).toStrictEqual(new Uint8Array(0))
+      expect(await tenantNames()).toStrictEqual(['acme'])
+    })
+
+    it('rejects a tenant on a single-tenant collection', async () => {
+      await storage.write('key', encode('value'))
+
+      await expect(acme.read('key')).rejects.toThrow(/is not multi-tenant/)
+      await expect(acme.write('key', encode('value'))).rejects.toThrow(/is not multi-tenant/)
+      await expect(acme.list('')).rejects.toThrow(/is not multi-tenant/)
+      await expect(acme.search('value')).rejects.toThrow(/is not multi-tenant/)
+    })
+
+    it('requires a tenant on a multi-tenant collection', async () => {
+      await acme.write('key', encode('value'))
+
+      await expect(storage.read('key')).rejects.toThrow(/is multi-tenant; pass tenant/)
+      await expect(storage.write('key', encode('value'))).rejects.toThrow(/is multi-tenant; pass tenant/)
+      await expect(storage.list('')).rejects.toThrow(/is multi-tenant; pass tenant/)
+    })
+
+    it('serves tenants from a storage created without one', async () => {
+      await storage.withTenant('acme').write('key', encode('value'))
+
+      expect(decode(await storage.withTenant('acme').read('key'))).toBe('value')
+      expect(await tenantNames()).toStrictEqual(['acme'])
+    })
+
+    it('fails clearly when the collection does not create tenants automatically', async () => {
+      await client.collections.create({
+        name: collectionName,
+        properties: WeaviateStorage.collectionProperties(),
+        vectorizers: configure.vectors.selfProvided(),
+        multiTenancy: configure.multiTenancy({ enabled: true }),
+      })
+
+      await expect(acme.write('key', encode('value'))).rejects.toThrow(/does not create tenants automatically/)
+      expect(await acme.read('key')).toBeNull()
+      expect(await tenantNames()).toStrictEqual([])
+    })
+
+    it('keeps FileMemoryStore memories within their tenant', async () => {
+      const acmeStore = new FileMemoryStore({ name: 'user', storage: acme })
+      const globexStore = new FileMemoryStore({ name: 'user', storage: acme.withTenant('globex') })
+      await acmeStore.add('# Drinks\nthe user drinks oat milk coffee')
+
+      expect((await acmeStore.search('coffee')).map((entry) => entry.metadata?.path)).toStrictEqual(['drinks.md'])
+      expect(await globexStore.search('coffee')).toStrictEqual([])
+    })
+
+    it.each(['a', 'ok_Name-1', 'x'.repeat(64)])('accepts the tenant name %j', async (tenant) => {
+      await new WeaviateStorage(client, { collectionName, tenant }).write('key', encode('value'))
+
+      expect(await tenantNames()).toStrictEqual([tenant])
+    })
+  })
+
   describe('SDK consumers', () => {
     it('satisfies the Storage interface and backs a SessionManager', () => {
       const typed: Storage = storage
@@ -418,6 +553,13 @@ describe.each(backends)('WeaviateStorage on $name', ({ connect }) => {
 })
 
 describe('WeaviateStorage configuration', () => {
+  it.each(['', 'has space', 'a/b', 'café', 'x'.repeat(65)])('rejects the tenant name %j', (tenant) => {
+    const client = new FakeClient().asClient()
+
+    expect(() => new WeaviateStorage(client, { tenant })).toThrow(RangeError)
+    expect(() => new WeaviateStorage(client).withTenant(tenant)).toThrow(RangeError)
+  })
+
   it.each([{ alpha: 1.5 }, { alpha: -0.1 }, { maxResults: 0 }, { maxIndexedChars: 0 }, { alpha: Number.NaN }])(
     'rejects the out-of-range config %j',
     (config) => {

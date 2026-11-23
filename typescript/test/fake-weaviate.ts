@@ -95,13 +95,50 @@ function project(stored: StoredObject, returnProperties: string[] | undefined, m
 }
 
 export class FakeCollection {
-  readonly objects = new Map<string, StoredObject>()
-  readonly calls: [string, Record<string, unknown>][] = []
-
   constructor(
     readonly schema: { name: string; dataType: string; tokenization?: string }[],
-    readonly hasVectorizer: boolean
+    readonly hasVectorizer: boolean,
+    readonly multiTenant = false,
+    readonly autoTenantCreation = false,
+    // Objects per tenant; a single-tenant collection keeps them under ''.
+    readonly shards = new Map<string, Map<string, StoredObject>>(),
+    readonly calls: [string, Record<string, unknown>][] = [],
+    readonly tenant?: string
   ) {}
+
+  withTenant(tenant: string): FakeCollection {
+    return new FakeCollection(
+      this.schema,
+      this.hasVectorizer,
+      this.multiTenant,
+      this.autoTenantCreation,
+      this.shards,
+      this.calls,
+      tenant
+    )
+  }
+
+  readonly tenants = {
+    get: async () => Object.fromEntries([...this.shards.keys()].filter(Boolean).map((name) => [name, { name }])),
+  }
+
+  /** The current tenant's objects, failing the way Weaviate does for a bad tenant. */
+  private _shard(create = false): Map<string, StoredObject> {
+    const key = this.tenant ?? ''
+    if (!this.multiTenant) {
+      if (this.tenant !== undefined) throw new Error('class has multi-tenancy disabled, but request was with tenant')
+    } else if (this.tenant === undefined) {
+      throw new Error('class has multi-tenancy enabled, but request was without tenant')
+    } else if (!this.shards.has(key) && !(create && this.autoTenantCreation)) {
+      throw new Error(`tenant not found: "${this.tenant}"`)
+    }
+    if (!this.shards.has(key)) this.shards.set(key, new Map())
+    return this.shards.get(key)!
+  }
+
+  get objects(): Map<string, StoredObject> {
+    return this._shard()
+  }
 
   readonly filter = {
     byProperty: (property: string) => ({
@@ -114,6 +151,7 @@ export class FakeCollection {
     get: async () => ({
       properties: this.schema.map((property) => ({ tokenization: 'none', ...property })),
       vectorizers: { default: { vectorizer: { name: this.hasVectorizer ? 'text2vec-weaviate' : 'none' } } },
+      multiTenancy: { enabled: this.multiTenant },
     }),
   }
 
@@ -121,13 +159,15 @@ export class FakeCollection {
     insertMany: async (
       objects: { id: string; properties: Record<string, unknown>; vectors?: StoredObject['vectors'] }[]
     ) => {
+      // Like the server, the tenant is created before the objects are validated.
+      const shard = this._shard(true)
       const errors: Record<number, { message: string }> = {}
       objects.forEach((item, index) => {
         if (item.properties.data === '') {
           errors[index] = { message: "invalid blob property 'data': not a valid blob base64 string" }
           return
         }
-        this.objects.set(item.id, { properties: { ...item.properties }, vectors: item.vectors })
+        shard.set(item.id, { properties: { ...item.properties }, vectors: item.vectors })
       })
       return { hasErrors: Object.keys(errors).length > 0, errors }
     },
@@ -222,9 +262,19 @@ export class FakeClient {
 
   readonly collections = {
     exists: async (name: string) => this.store.has(name),
-    create: async (config: { name: string; properties: FakeCollection['schema']; vectorizers?: unknown }) => {
+    create: async (config: {
+      name: string
+      properties: FakeCollection['schema']
+      vectorizers?: unknown
+      multiTenancy?: { enabled?: boolean; autoTenantCreation?: boolean }
+    }) => {
       // A test asks for a server-side vectorizer by passing the string "vectorizer".
-      const collection = new FakeCollection(config.properties, config.vectorizers === 'vectorizer')
+      const collection = new FakeCollection(
+        config.properties,
+        config.vectorizers === 'vectorizer',
+        config.multiTenancy?.enabled ?? false,
+        config.multiTenancy?.autoTenantCreation ?? false
+      )
       this.store.set(config.name, collection)
       return collection
     },

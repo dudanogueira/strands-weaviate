@@ -77,12 +77,19 @@ export interface WeaviateStorageConfig {
    * its vector something other than `default`.
    */
   vectorName?: string
+  /**
+   * Tenant whose shard this storage reads and writes, in a multi-tenant collection. When the
+   * storage creates the collection for a tenant, it enables multi-tenancy; an existing
+   * single-tenant collection cannot be converted.
+   */
+  tenant?: string
 }
 
-/** Collection state shared by a storage and every view returned by its `namespace()`. */
+/** Collection state shared by a storage and every view from `namespace()` or `withTenant()`. */
 interface SharedState {
   collection?: Promise<Collection>
   hasVectorizer: boolean
+  multiTenant: boolean
   /** The root storage's prefix, which `indexPrefixes` are relative to. */
   rootPrefix: string
 }
@@ -93,6 +100,10 @@ interface SharedState {
  * Vectors come from one of two places: pass an `embedder` to compute them in the SDK, or
  * create the collection yourself with a Weaviate vectorizer (see
  * {@link WeaviateStorage.collectionProperties}). With neither, search is BM25 only.
+ *
+ * Pass `tenant` (or call {@link WeaviateStorage.withTenant}) to keep each tenant's objects in
+ * its own shard of a multi-tenant collection. A tenant is created by the first value written
+ * to it, never by a read, list, search or delete.
  */
 export class WeaviateStorage implements Storage {
   private readonly _client: WeaviateClient
@@ -106,6 +117,7 @@ export class WeaviateStorage implements Storage {
   private readonly _maxIndexedChars: number
   private readonly _createCollection: boolean
   private readonly _vectorName: string | undefined
+  private _tenant: string | undefined
   private readonly _shared: SharedState
   // A filtered fetch is only complete within a single page, so list() asks for one page of
   // this size and falls back to a full cursor scan when the page comes back full.
@@ -118,7 +130,8 @@ export class WeaviateStorage implements Storage {
    *   connects or closes it.
    * @param config - Storage configuration
    * @throws StorageError if `prefix` is invalid
-   * @throws RangeError if `searchMode`, `alpha`, `maxResults` or `maxIndexedChars` is out of range
+   * @throws RangeError if `searchMode`, `alpha`, `maxResults`, `maxIndexedChars` or `tenant` is
+   *   out of range
    */
   constructor(client: WeaviateClient, config: WeaviateStorageConfig = {}) {
     const alpha = config.alpha ?? 0.5
@@ -148,7 +161,13 @@ export class WeaviateStorage implements Storage {
     this._maxIndexedChars = maxIndexedChars
     this._createCollection = config.createCollection ?? true
     this._vectorName = config.vectorName
-    this._shared = { hasVectorizer: false, rootPrefix: this._prefix }
+    this._tenant = config.tenant === undefined ? undefined : validateTenant(config.tenant)
+    this._shared = { hasVectorizer: false, multiTenant: false, rootPrefix: this._prefix }
+  }
+
+  /** The tenant this storage is bound to, or `undefined` for a single-tenant collection. */
+  get tenant(): string | undefined {
+    return this._tenant
   }
 
   /** The normalized key prefix (ending in `/`), or `''` when none was configured. */
@@ -225,7 +244,7 @@ export class WeaviateStorage implements Storage {
     if (data.byteLength > 0) properties.data = Buffer.from(data).toString('base64')
     if (text !== undefined) properties.text = text
 
-    await this._run(`Failed to write '${key}' to Weaviate (${data.byteLength} bytes)`, async (collection) => {
+    const insert = async (collection: Collection): Promise<void> => {
       // A single-object batch replaces the whole object by id; data.insert rejects existing ids.
       const result = await collection.data.insertMany([
         {
@@ -240,6 +259,14 @@ export class WeaviateStorage implements Storage {
           .join('; ')
         throw new StorageError(`Failed to write '${key}' to Weaviate (${data.byteLength} bytes): ${messages}`)
       }
+    }
+    await this._run(`Failed to write '${key}' to Weaviate (${data.byteLength} bytes)`, insert, (error) => {
+      throw new StorageError(
+        `Failed to write '${key}' to Weaviate: tenant '${this._tenant}' does not exist and the collection ` +
+          'does not create tenants automatically; enable automatic tenant creation on the collection or ' +
+          'create the tenant first',
+        { cause: error }
+      )
     })
   }
 
@@ -252,10 +279,11 @@ export class WeaviateStorage implements Storage {
    */
   async read(key: string): Promise<Uint8Array | null> {
     const fullKey = this._prefix + normalizeKey(key)
-    return this._run(`Failed to read '${key}' from Weaviate`, async (collection) => {
+    const fetch = async (collection: Collection): Promise<Uint8Array | null> => {
       const stored = await collection.query.fetchObjectById(keyUuid(fullKey), { returnProperties: ['data'] })
       return stored ? decodeBlob(stored.properties.data) : null
-    })
+    }
+    return this._run(`Failed to read '${key}' from Weaviate`, fetch, () => null)
   }
 
   /**
@@ -266,9 +294,10 @@ export class WeaviateStorage implements Storage {
    */
   async delete(key: string): Promise<void> {
     const fullKey = this._prefix + normalizeKey(key)
-    await this._run(`Failed to delete '${key}' from Weaviate`, async (collection) => {
+    const remove = async (collection: Collection): Promise<void> => {
       await collection.data.deleteById(keyUuid(fullKey))
-    })
+    }
+    await this._run(`Failed to delete '${key}' from Weaviate`, remove, () => undefined)
   }
 
   /**
@@ -280,7 +309,7 @@ export class WeaviateStorage implements Storage {
    */
   async list(query: string): Promise<string[]> {
     const fullPrefix = this._prefix + normalizePrefix(query)
-    const keys = await this._run(`Failed to list keys with prefix '${query}' from Weaviate`, async (collection) => {
+    const collect = async (collection: Collection): Promise<string[]> => {
       if (fullPrefix) {
         const page = await collection.query.fetchObjects({
           filters: collection.filter.byProperty('key').like(`${fullPrefix}*`),
@@ -296,7 +325,8 @@ export class WeaviateStorage implements Storage {
         scanned.push(stored.properties.key as string)
       }
       return scanned
-    })
+    }
+    const keys = await this._run(`Failed to list keys with prefix '${query}' from Weaviate`, collect, () => [])
 
     // Like treats '*' and '?' in the prefix as wildcards, so the server can over-match.
     return keys
@@ -316,7 +346,7 @@ export class WeaviateStorage implements Storage {
   async search(query: string): Promise<StorageSearchResult[]> {
     if (!query.trim()) return []
 
-    return this._run(`Failed to search Weaviate collection '${this._collectionName}'`, async (collection) => {
+    const find = async (collection: Collection): Promise<StorageSearchResult[]> => {
       const mode = this._searchMode ?? (this._embedder || this._shared.hasVectorizer ? 'hybrid' : 'bm25')
       const vector = mode !== 'bm25' && this._embedder ? await this._embedder.embed(query) : undefined
 
@@ -360,7 +390,8 @@ export class WeaviateStorage implements Storage {
         })
       }
       return results
-    })
+    }
+    return this._run(`Failed to search Weaviate collection '${this._collectionName}'`, find, () => [])
   }
 
   /**
@@ -375,11 +406,40 @@ export class WeaviateStorage implements Storage {
    * @throws StorageError if the prefix contains backslashes or a '..' segment
    */
   namespace(prefix: string): WeaviateStorage {
-    const scoped: WeaviateStorage = Object.create(Object.getPrototypeOf(this))
-    Object.assign(scoped, this)
+    const scoped = this._clone()
     scoped._prefix = this._prefix + scopePrefix(prefix)
     Object.defineProperty(scoped, NAMESPACED, { value: true })
     return scoped
+  }
+
+  /**
+   * Returns a `WeaviateStorage` bound to `tenant`, sharing this instance's client.
+   *
+   * The view keeps this storage's prefix and configuration. Calling this makes no request to
+   * Weaviate: the tenant comes into existence when the first value is written to it.
+   *
+   * @param tenant - The tenant whose shard the returned storage reads and writes
+   * @returns A `WeaviateStorage` bound to the tenant
+   * @throws RangeError if the tenant name is not one Weaviate accepts
+   */
+  withTenant(tenant: string): WeaviateStorage {
+    const scoped = this._clone()
+    scoped._tenant = validateTenant(tenant)
+    return scoped
+  }
+
+  /** Copies this storage, keeping the shared collection state and the namespaced marker. */
+  private _clone(): WeaviateStorage {
+    const copy: WeaviateStorage = Object.create(Object.getPrototypeOf(this))
+    Object.assign(copy, this)
+    if (NAMESPACED in this) Object.defineProperty(copy, NAMESPACED, { value: true })
+    return copy
+  }
+
+  /** Whether an error means this storage's tenant has not been created yet. */
+  private _isMissingTenant(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return this._tenant !== undefined && message.includes('tenant not found')
   }
 
   /** Returns the text to make searchable for a value, or undefined if it is not indexed. */
@@ -404,31 +464,59 @@ export class WeaviateStorage implements Storage {
       .join('')
   }
 
-  /** Runs an operation against the collection, wrapping any failure in a StorageError. */
-  private async _run<T>(message: string, operation: (collection: Collection) => Promise<T>): Promise<T> {
+  /**
+   * Runs an operation against the collection, wrapping any failure in a StorageError.
+   *
+   * @param onMissingTenant - Supplies the result when this storage's tenant does not exist yet
+   */
+  private async _run<T>(
+    message: string,
+    operation: (collection: Collection) => Promise<T>,
+    onMissingTenant: (error: unknown) => T
+  ): Promise<T> {
     try {
       return await operation(await this._getCollection())
     } catch (error) {
+      if (this._isMissingTenant(error)) return onMissingTenant(error)
       if (error instanceof StorageError) throw error
       throw new StorageError(message, { cause: error })
     }
   }
 
-  /** Returns the validated collection, creating it on first use. */
-  private _getCollection(): Promise<Collection> {
+  /**
+   * Returns the validated collection handle for this storage's tenant.
+   *
+   * The collection is created on first use. A tenant is not: the handle only names it.
+   */
+  private async _getCollection(): Promise<Collection> {
     if (!this._shared.collection) {
-      const opening = this._openCollection()
+      const opening = this._openCollection(this._tenant !== undefined)
       this._shared.collection = opening
       // A failed open is not cached, so the next call retries.
       opening.catch(() => {
         if (this._shared.collection === opening) delete this._shared.collection
       })
     }
-    return this._shared.collection
+    const collection = await this._shared.collection
+
+    const name = this._collectionName
+    if (this._tenant === undefined) {
+      if (this._shared.multiTenant) {
+        throw new StorageError(`Weaviate collection '${name}' is multi-tenant; pass tenant or use withTenant()`)
+      }
+      return collection
+    }
+    if (!this._shared.multiTenant) {
+      throw new StorageError(
+        `Weaviate collection '${name}' is not multi-tenant, so tenant '${this._tenant}' cannot be used; ` +
+          'multi-tenancy can only be enabled when a collection is created, so use a new collectionName'
+      )
+    }
+    return collection.withTenant(this._tenant)
   }
 
   /** Creates the collection if needed and checks that its schema fits this backend. */
-  private async _openCollection(): Promise<Collection> {
+  private async _openCollection(multiTenant: boolean): Promise<Collection> {
     const name = this._collectionName
     const collections = this._client.collections
     if (!(await collections.exists(name))) {
@@ -440,6 +528,12 @@ export class WeaviateStorage implements Storage {
           name,
           properties: WeaviateStorage.collectionProperties(),
           vectorizers: configure.vectors.selfProvided({ name: this._vectorName ?? 'default' }),
+          // Tenants are created by the first object inserted into them, never up front.
+          multiTenancy: configure.multiTenancy({
+            enabled: multiTenant,
+            autoTenantCreation: multiTenant,
+            autoTenantActivation: multiTenant,
+          }),
         })
       } catch (error) {
         // Another process may have created it between the check and the create.
@@ -464,8 +558,17 @@ export class WeaviateStorage implements Storage {
       )
     }
     this._shared.hasVectorizer = Object.values(config.vectorizers).some((vector) => vector.vectorizer.name !== 'none')
+    this._shared.multiTenant = config.multiTenancy.enabled
     return collection
   }
+}
+
+/** Returns the tenant name, or throws if Weaviate would reject it. */
+function validateTenant(tenant: string): string {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenant)) {
+    throw new RangeError(`tenant must be 1 to 64 characters of letters, digits, '_' or '-', got '${tenant}'`)
+  }
+  return tenant
 }
 
 /** Decodes a blob property into a fresh buffer; an absent blob is an empty value. */
