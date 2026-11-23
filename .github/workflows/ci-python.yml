@@ -57,6 +57,43 @@ jobs:
       - name: Run tests
         run: hatch run test
 
+  integ:
+    name: Integration - Weaviate
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      weaviate:
+        image: cr.weaviate.io/semitechnologies/weaviate:1.40.7
+        ports:
+          - 8080:8080
+          - 50051:50051
+        env:
+          AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+          PERSISTENCE_DATA_PATH: /var/lib/weaviate
+          DEFAULT_VECTORIZER_MODULE: none
+          CLUSTER_HOSTNAME: node1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install hatch
+        run: pip install hatch
+
+      - name: Wait for Weaviate
+        run: timeout 60 bash -c 'until curl -sf localhost:8080/v1/.well-known/ready; do sleep 1; done'
+
+      - name: Run integration tests
+        run: hatch run test-integ
+
   lint:
     name: Lint
     if: github.event_name != 'schedule'

@@ -3,16 +3,16 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "strands-template"
+name = "strands-weaviate"
 dynamic = ["version"]
-description = "Your package description"
+description = "Weaviate Storage backend for Strands Agents with built-in hybrid search"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "BSD-3-Clause"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Duda Nogueira"}
 ]
-keywords = ["strands", "agents", "ai", "tool"]
+keywords = ["strands", "agents", "ai", "weaviate", "storage", "vector-search"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,15 +25,15 @@ classifiers = [
 ]
 
 dependencies = [
-    "strands-agents>=1.0.0",
-    "pydantic>=2.0.0",
+    "strands-agents>=1.64.0",
+    "weaviate-client>=4.17.0,<5.0.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/strands-template"
-Documentation = "https://github.com/yourusername/strands-template#readme"
-Repository = "https://github.com/yourusername/strands-template"
-Issues = "https://github.com/yourusername/strands-template/issues"
+Homepage = "https://github.com/dudanogueira/strands-weaviate"
+Documentation = "https://github.com/dudanogueira/strands-weaviate#readme"
+Repository = "https://github.com/dudanogueira/strands-weaviate"
+Issues = "https://github.com/dudanogueira/strands-weaviate/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -59,7 +59,7 @@ tag_regex = "^python-v(?P<version>.+)$"
 relative_to = "pyproject.toml"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/strands_template"]
+packages = ["src/strands_weaviate"]
 
 [tool.hatch.envs.default]
 dependencies = [
@@ -71,6 +71,7 @@ dependencies = [
 
 [tool.hatch.envs.default.scripts]
 test = "pytest {args}"
+test-integ = "pytest -m integ {args}"
 lint = "ruff check src tests"
 format = "ruff format src tests"
 typecheck = "mypy src"
@@ -96,5 +97,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 asyncio_mode = "auto"
+addopts = "-m 'not integ'"
+markers = [
+    "integ: runs against a real Weaviate instance (see README)",
+]

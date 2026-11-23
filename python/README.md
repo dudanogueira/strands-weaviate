@@ -1,225 +1,173 @@
-<div align="center">
-  <div>
-    <a href="https://strandsagents.com">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="https://strandsagents.com/latest/assets/wordmark-github-dark.svg">
-        <img src="https://strandsagents.com/latest/assets/wordmark-github-light.svg" alt="Strands" width="320">
-      </picture>
-    </a>
-  </div>
-  <h1>Strands Agents Extension Template — Python</h1>
-  <h2>Build and publish custom Python components for Strands Agents.</h2>
-  <p>
-    <a href="https://strandsagents.com/">Documentation</a> ◆
-    <a href="https://github.com/strands-agents/samples">Samples</a> ◆
-    <a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-cli">CLI</a> ◆
-    <a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-mcp">MCP Server</a>
-    <br>
-    Harness (<a href="https://github.com/strands-agents/harness-sdk/tree/main/harness-py">Python</a>, <a href="https://github.com/strands-agents/harness-sdk/tree/main/harness-ts">TypeScript</a>) ◆
-    SDK (<a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-py">Python</a>, <a href="https://github.com/strands-agents/harness-sdk/tree/main/strands-ts">TypeScript</a>) ◆
-    <a href="https://github.com/strands-agents/box">Box</a> ◆
-    <a href="https://github.com/strands-agents/shell">Shell</a> ◆
-    <a href="https://github.com/strands-agents/evals">Evals</a> ◆
-    <a href="https://github.com/strands-labs">Labs</a>
-  </p>
-</div>
+# strands-weaviate (Python)
 
-This template helps you build and publish custom components for [Strands Agents](https://github.com/strands-agents/harness-sdk/tree/main/strands-py). Whether you're creating a new tool, model provider, or storage backend, this directory gives you a starting point with the right structure and conventions.
+A [Weaviate](https://weaviate.io) `Storage` backend for
+[Strands Agents](https://strandsagents.com). One collection holds session snapshots, offloaded
+context and agent memory, and `search()` runs a Weaviate hybrid (BM25 + vector) query instead
+of a keyword scan.
 
-> This is the Python half of the [extension-template](../README.md) monorepo. For the TypeScript equivalent, see [`../typescript/`](../typescript/).
+Each key is one Weaviate object carrying the raw bytes, the searchable text and the vector, so
+an overwrite or delete can never leave a stale search entry behind.
 
-## Getting started
-
-### 1. Create your repository
-
-Click "Use this template" on GitHub to create your own repository. Then clone it locally and switch into this directory:
+## Install
 
 ```bash
-git clone https://github.com/yourusername/your-repo-name
-cd your-repo-name/python
+pip install strands-weaviate
 ```
 
-### 2. Run the setup script
+Requires Python 3.10+, `strands-agents>=1.64.0` and a Weaviate server reachable through the
+synchronous `weaviate-client` v4.
 
-The setup script customizes the template for your project. It renames files, updates imports, configures `pyproject.toml`, and removes components you don't need.
+## Quickstart
 
-```bash
-python setup_template.py
+```python
+import weaviate
+from strands_weaviate import WeaviateStorage
+
+client = weaviate.connect_to_local()  # or weaviate.connect_to_weaviate_cloud(...)
+storage = WeaviateStorage(client)
+
+await storage.write("memory/notes.md", b"The user prefers concise answers.")
+await storage.read("memory/notes.md")        # b"The user prefers concise answers."
+await storage.list("memory/")                # ["memory/notes.md"]
+await storage.search("concise answers")      # [StorageSearchResult(key="memory/notes.md", ...)]
 ```
 
-You'll be prompted for:
+You own the client: `WeaviateStorage` never connects or closes it. The collection
+(`StrandsStorage` by default) is created on first use.
 
-- **Package name** — A short identifier like `amazon`, `slack`, or `redis`. This becomes your module name (`strands_amazon`) and PyPI package name (`strands-amazon`).
-- **Components** — Which extension points you want to include (tool, model, etc.)
-- **Author info** — Your name, email, and GitHub username for `pyproject.toml`.
-- **Description** — A one-line description of your package.
+### Agent memory
 
-### 3. Install dependencies
+```python
+from strands import Agent
+from strands.memory import MemoryManager
+from strands.vended_memory_stores import FileMemoryStore
+
+memory_store = FileMemoryStore(name="user", storage=storage)
+agent = Agent(memory_manager=MemoryManager(stores=[memory_store]))
+```
+
+Recall goes through `storage.search()`, and results carry their content, so the store does not
+re-read each hit.
+
+### Sessions
+
+```python
+from strands.session import SnapshotSessionManager
+
+agent = Agent(session_manager=SnapshotSessionManager(session_id="chat-42", storage=storage))
+```
+
+## Search modes
+
+| Vectors come from | How to set it up | Default search |
+|---|---|---|
+| Nothing | `WeaviateStorage(client)` | BM25 |
+| An SDK embedder | `WeaviateStorage(client, embedder=...)` | Hybrid |
+| A Weaviate vectorizer | Create the collection yourself (below) | Hybrid |
+
+Set `search_mode` to `"hybrid"`, `"vector"` or `"bm25"` to override, and `alpha` (0 = BM25
+only, 1 = vector only) to weight hybrid search. Scores are higher-is-better and are not
+comparable across modes.
+
+With an SDK embedder:
+
+```python
+from strands.storage.embeddings.bedrock import BedrockEmbedder
+
+storage = WeaviateStorage(client, embedder=BedrockEmbedder())
+```
+
+With a Weaviate vectorizer, create the collection from the backend's property definitions and
+vectorize only `text`:
+
+```python
+from weaviate.classes.config import Configure
+
+client.collections.create(
+    "StrandsStorage",
+    properties=WeaviateStorage.collection_properties(),
+    vector_config=Configure.Vectors.text2vec_weaviate(
+        source_properties=["text"], vectorize_collection_name=False
+    ),
+)
+storage = WeaviateStorage(client)
+```
+
+## What gets indexed
+
+A value is searchable when it is non-empty UTF-8 text without NUL bytes. Everything else
+(images, framed context-offloader payloads) is stored and readable but never embedded.
+
+Session snapshots are JSON text, so a storage shared by sessions and memory would embed every
+snapshot on every turn. Restrict indexing to the keys you search:
+
+```python
+storage = WeaviateStorage(client, embedder=embedder, index_prefixes=["memory/"])
+```
+
+## Configuration
+
+| Argument | Default | Purpose |
+|---|---|---|
+| `client` | required | Connected synchronous `weaviate.WeaviateClient` |
+| `collection_name` | `"StrandsStorage"` | Collection that holds the objects |
+| `prefix` | `""` | Key prefix for everything this storage reads and writes |
+| `embedder` | `None` | SDK `Embedder` used for values and queries |
+| `search_mode` | `None` (automatic) | `"hybrid"`, `"vector"` or `"bm25"` |
+| `alpha` | `0.5` | Hybrid weighting |
+| `max_results` | `10` | Results returned by `search()` |
+| `index_prefixes` | `None` (all text) | Key prefixes, relative to `prefix`, to make searchable |
+| `max_indexed_chars` | `8000` | Longest text indexed per value |
+| `create_collection` | `True` | Create the collection when missing |
+| `vector_name` | `None` | Named vector to write and search |
+
+`storage.namespace("tenant-a")` returns a view scoped to a key prefix that shares the client
+and collection. Its searches are filtered by prefix inside Weaviate, so `max_results` applies
+within the namespace.
+
+## Limits
+
+- **Synchronous client only.** The SDK's synchronous entry points run storage calls on a new
+  event loop per call, which an async client cannot span. Passing a `WeaviateAsyncClient`
+  raises `StorageError`.
+- **Value size.** A value travels base64-encoded in a single gRPC message. Against a default
+  Weaviate 1.40 server, 64 MB values stored and read back and a 90 MB value was rejected.
+  Larger writes raise `StorageError`. Use an object store for media-heavy sessions.
+- **One vector per key.** Values are not chunked. Text beyond `max_indexed_chars` is readable
+  but not searchable.
+- **BM25 is lexical.** Without a vector source, `drink` does not match `drinks`.
+- **Listing.** `list(prefix)` is one filtered query when fewer than 1000 keys match, and a
+  scan of the whole collection otherwise.
+- **Namespaces are not a security boundary.** Every view shares one collection and credential.
+- **Replicated clusters.** The SDK expects read-after-write; this backend uses the client's
+  default consistency level.
+- **Concurrent memory writers.** `FileMemoryStore.add` merges in-process only, so two
+  processes appending to the same entry can lose an update (true of every backend).
+
+## Development
 
 ```bash
 pip install -e ".[dev]"
+hatch run prepare      # format, lint, type-check, unit tests
 ```
 
-## What's in this template
-
-The template includes skeleton implementations for all major Strands extension points.
-
-| File | Component | Purpose |
-|------|-----------|---------|
-| `tool.py` | Tool | Add capabilities to agents using the `@tool` decorator |
-| `model.py` | Model provider | Integrate custom LLM APIs |
-| `plugin.py` | Plugin | Extend agent behavior with hooks and tools in a composable package |
-| `intervention.py` | Intervention | Add composable control handlers for authorization, guardrails, and steering |
-| `conversation_manager.py` | Conversation manager | Control context window and message history |
-| `memory_store.py` | Memory store | Give agents cross-session knowledge via a search backend |
-| `storage.py` | Storage | Persist sessions, offloaded context, and other data under string keys |
-| `decision_model.py` | Decision model | Answer closed questions over agent state through a decision API |
-
-The setup script will remove components you don't select, so you only keep what you need.
-
-## Implementing your components
-
-Each file contains a minimal skeleton. Here's what to implement:
-
-### Tools
-
-Tools let agents interact with external systems and perform actions. Implement your logic inside the decorated function and return a result dict.
-
-- [Creating custom tools](https://strandsagents.com/docs/user-guide/sdk/tools/custom-tools/) - Documentation
-- [sleep](https://github.com/strands-agents/harness-sdk/blob/main/strands-py/src/strands/vended_tools/sleep/sleep.py) - Simple tool with input validation and error handling
-- [http_request](https://github.com/strands-agents/harness-sdk/tree/main/strands-py/src/strands/vended_tools/http_request) - Tool package with a configuration factory and typed output
-
-### Plugins
-
-Plugins provide a composable way to extend agent behavior by bundling hooks and tools into a single package. Use `@hook` to react to agent lifecycle events and `@tool` to add capabilities, all auto-discovered and registered when the plugin is attached to an agent.
-
-- [Plugins](https://strandsagents.com/docs/user-guide/sdk/plugins/) - Documentation
-- [AgentSkills](https://github.com/strands-agents/harness-sdk/tree/main/strands-py/src/strands/vended_plugins/skills) - Plugin example with hooks and tools
-- [Steering](https://github.com/strands-agents/harness-sdk/tree/main/strands-py/src/strands/vended_plugins/steering) - Advanced plugin example
-
-### Interventions
-
-Intervention handlers provide composable control layers for agents. Override lifecycle methods (like `before_tool_call`) to intercept events and return typed decisions: Proceed, Deny, Guide, Confirm, or Transform. Use them for authorization checks, guardrails, and human-in-the-loop approval.
-
-- [Interventions](https://strandsagents.com/docs/user-guide/sdk/agents/interventions/) - Documentation
-- [Vended interventions](https://github.com/strands-agents/harness-sdk/tree/main/strands-py/src/strands/vended_interventions) - Cedar authorization, HITL, and steering examples
-
-### Model providers
-
-Model providers connect agents to LLM APIs. Implement the `stream()` method to receive messages and yield streaming events.
-
-- [Custom providers](https://strandsagents.com/docs/user-guide/sdk/model-providers/custom_model_provider/) - Documentation
-- [strands-clova](https://github.com/aidendef/strands-clova) - Community model provider example
-
-### Decision models
-
-Decision models answer closed questions (yes/no or one of a fixed set of choices) over agent state. Subclass `DecisionModel` and implement `_ask()` to call your provider's decision API and return one answer per question. The base class validates questions and records tracing and usage.
-
-- [Custom decision models](https://strandsagents.com/docs/user-guide/sdk/decision-models/models/#custom-decision-models) - Documentation
-- [TypeSafeDecisionModel](https://github.com/strands-agents/harness-sdk/blob/main/strands-py/src/strands/decisions/typesafe_decision_model.py) - Implementation example
-
-### Storage
-
-Storage backends persist raw bytes under string keys. Implement `write()`, `read()`, `delete()`, and `list()`; the inherited `search()` gives keyword search on top of them. The SDK's `SnapshotSessionManager` saves sessions through a `Storage`, so implementing one is how you add a session backend such as S3, Redis, or a custom database. Context offloading uses the same interface.
-
-- [Session management](https://strandsagents.com/docs/user-guide/sdk/agents/session-management/) - Documentation
-- [Local file storage](https://github.com/strands-agents/harness-sdk/blob/main/strands-py/src/strands/storage/local_file_storage.py) - Implementation example
-
-### Conversation managers
-
-Conversation managers control the context window and how message history grows over time. They handle trimming old messages or summarizing context to stay within model limits.
-
-- [Conversation management](https://strandsagents.com/docs/user-guide/sdk/agents/conversation-management/) - Documentation
-- [Sliding window manager](https://github.com/strands-agents/harness-sdk/blob/main/strands-py/src/strands/agent/conversation_manager/sliding_window_conversation_manager.py) - Implementation example
-
-### Memory stores
-
-Memory stores give agents cross-session knowledge. A `MemoryManager` searches one or more stores to recall facts and, for writable stores, writes new ones. Implement `search()` to back memory with your own store — a vector database, a managed search service, or any system that retrieves entries by relevance. For writes, implement whichever sinks fit your backend. `add()` for adding an extracted memory. For discrete-entry backend (e.g. a vector DB), only implement this method. `add_messages()` for ingesting raw conversation turns to extract server-side. Only implement this for backends that support server side extraction. Store identity and behavior (`name`, `description`, `max_search_results`, `writable`, `extraction`) come from config via `MemoryStoreConfig`, matching the SDK's own stores; extend `TemplateMemoryStoreConfig` with any backend-specific fields.
-
-- [Memory](https://strandsagents.com/docs/user-guide/sdk/memory/overview/) - Documentation
-- [Bedrock Knowledge Base store](https://github.com/strands-agents/harness-sdk/tree/main/strands-py/src/strands/vended_memory_stores/bedrock_knowledge_base) - Implementation example
-
-## Testing
-
-Run all checks (format, lint, typecheck, test):
+The unit tests run against an in-memory fake. The same tests run against a real Weaviate with
+the `integ` marker:
 
 ```bash
-hatch run prepare
+docker compose -f ../docker-compose.yml up -d
+hatch run test-integ
+python examples/memory.py
 ```
 
-Or run them individually:
+Set `WEAVIATE_HTTP_PORT` and `WEAVIATE_GRPC_PORT` when Weaviate is not on 8080/50051.
 
-```bash
-hatch run test        # Run tests
-hatch run lint        # Run linter
-hatch run typecheck   # Run type checker
-hatch run format      # Format code
-```
+## Publishing
 
-## Publishing to PyPI
-
-You can publish manually or through GitHub Actions.
-
-### Option 1: GitHub release (recommended)
-
-The included workflow automatically publishes to PyPI when you create a GitHub release. Version is derived from the git tag automatically.
-
-1. Configure PyPI trusted publishing first (see below)
-2. Create a release on GitHub with a tag prefixed `python-v`, e.g. `python-v0.1.0`. The prefix lets the monorepo distinguish python and typescript releases; hatch-vcs strips it so the package version is just `0.1.0`.
-3. The workflow runs checks, builds, and publishes
-
-To configure PyPI trusted publishing:
-
-1. Go to PyPI → Your projects → Publishing
-2. Add a new pending publisher with your GitHub repo details
-3. Set environment name to `pypi`
-
-**Note:** If you create a release without configuring trusted publishing, the workflow will fail. Set this up before your first release.
-
-### Option 2: Manual publish
-
-```bash
-hatch build
-pip install twine
-twine upload dist/*
-```
-
-## Naming conventions
-
-Follow these conventions so your package fits the Strands ecosystem:
-
-| Item | Convention | Example |
-|------|------------|---------|
-| PyPI package | `strands-{name}` | `strands-amazon` |
-| Python module | `strands_{name}` | `strands_amazon` |
-| Model class | `{Name}Model` | `AmazonModel` |
-| Decision model class | `{Name}DecisionModel` | `TypeSafeDecisionModel` |
-| Plugin class | `{Name}Plugin` | `AmazonPlugin` |
-| Intervention class | `{Name}Intervention` | `CedarIntervention` |
-| Storage class | `{Name}Storage` | `RedisStorage` |
-| Conversation manager | `{Name}ConversationManager` | `SummarizingConversationManager` |
-| Memory store | `{Name}MemoryStore` | `RedisMemoryStore` |
-| Tool function | `{descriptive_name}` | `search_web`, `send_email` |
-
-## Get featured
-
-Help others discover your package by adding the `strands-agents` topic to your GitHub repository. This makes it easier for the community to find Strands extensions.
-
-To add topics: go to your repo → click the ⚙️ gear next to "About" → add `strands-agents` and other relevant topics.
-
-You can also submit your package to be featured on the Strands website. See [Get Featured](https://strandsagents.com/docs/community/get-featured/) for details.
-
-## Resources
-
-- [Strands Agents documentation](https://strandsagents.com/)
-- [Python SDK](https://github.com/strands-agents/harness-sdk/tree/main/strands-py)
-- [SDK vended tools](https://github.com/strands-agents/harness-sdk/tree/main/strands-py/src/strands/vended_tools)
-- [Community packages](https://strandsagents.com/docs/community/community-packages/)
-
-## Security
-
-See [CONTRIBUTING](../CONTRIBUTING.md#security-issue-notifications) for more information.
+Create a GitHub release tagged `python-v<version>` (for example `python-v0.1.0`). The
+`publish-python.yml` workflow runs the checks, builds, and publishes through PyPI trusted
+publishing (environment `pypi`), which must be configured on PyPI first.
 
 ## License
 
-BSD 3-Clause — see [LICENSE](../LICENSE) for details.
+Apache-2.0. See [LICENSE](../LICENSE).
