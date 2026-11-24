@@ -37,7 +37,7 @@
     "tool"
   ],
   "author": "Your Name <your.email@example.com>",
-  "license": "Apache-2.0",
+  "license": "BSD-3-Clause",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yourusername/strands-template.git"

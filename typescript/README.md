@@ -213,4 +213,4 @@ See [CONTRIBUTING](../CONTRIBUTING.md#security-issue-notifications) for more inf
 
 ## License
 
-Apache 2.0 — see [LICENSE](../LICENSE) for details.
+BSD 3-Clause — see [LICENSE](../LICENSE) for details.

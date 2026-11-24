@@ -437,8 +437,8 @@ function stripMonorepoFromReadme(): void {
       continue
     }
     if (line.includes('This is the TypeScript half of the')) continue
-    if (line.includes('Apache 2.0 — see [LICENSE](../LICENSE)')) {
-      out.push('Apache 2.0 — see [LICENSE](LICENSE) for details.')
+    if (line.includes('BSD 3-Clause — see [LICENSE](../LICENSE)')) {
+      out.push('BSD 3-Clause — see [LICENSE](LICENSE) for details.')
       continue
     }
     let next = line

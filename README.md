@@ -71,4 +71,4 @@ When the setup script hoists your chosen language to the repo root, it drops the
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE) for details.
+BSD 3-Clause — see [LICENSE](LICENSE) for details.
