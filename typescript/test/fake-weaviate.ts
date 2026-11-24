@@ -259,6 +259,12 @@ export class FakeCollection {
 
 export class FakeClient {
   readonly store = new Map<string, FakeCollection>()
+  /** Like the real client, the object returned here is the one spread into every request. */
+  readonly headers: Record<string, string> = {}
+
+  async getConnectionDetails() {
+    return { host: 'localhost', headers: this.headers }
+  }
 
   readonly collections = {
     exists: async (name: string) => this.store.has(name),

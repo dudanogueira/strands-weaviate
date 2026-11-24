@@ -180,6 +180,14 @@ The [Python package](../python/README.md) uses the same collection schema and de
 object id for a key, so both SDKs can read and write one collection. Option names are the
 snake_case forms of the ones above (`collection_name`, `search_mode`, `index_prefixes`, ...).
 
+## Telemetry
+
+`WeaviateStorage` adds an `X-Weaviate-Client-Integration: strands-typescript/<version>` header
+to the client's requests, so Weaviate's usage telemetry can count this integration. It carries
+only the integration name and the installed `strands-weaviate` version. Weaviate servers report
+it only when their telemetry is enabled; set `DISABLE_TELEMETRY=true` on the server to turn
+that off.
+
 ## Limits
 
 - **Node.js only.** The Weaviate client uses gRPC and does not run in the browser.

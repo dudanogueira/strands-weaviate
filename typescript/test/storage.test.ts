@@ -15,6 +15,8 @@ import { FileMemoryStore } from '@strands-agents/sdk/vended-memory-stores/file-m
 import weaviate, { configure, type WeaviateClient } from 'weaviate-client'
 import { WeaviateStorage } from '../src/storage.js'
 import { keyUuid } from '../src/keys.js'
+import { integrationVersion } from '../src/telemetry.js'
+import packageJson from '../package.json' with { type: 'json' }
 import { FakeClient, FakeEmbedder } from './fake-weaviate.js'
 
 const NAMESPACED = Symbol.for('strands.storage.namespaced')
@@ -549,6 +551,30 @@ describe.each(backends)('WeaviateStorage on $name', ({ connect }) => {
       expect(reads).not.toHaveBeenCalled()
       expect(await storage.list('')).toStrictEqual(['memory/user/drinks.md', 'memory/user/editor.md'])
     })
+  })
+})
+
+describe('WeaviateStorage integration header', () => {
+  it('tags the connection before the first request', async () => {
+    const fake = new FakeClient()
+    const storage = new WeaviateStorage(fake.asClient())
+    expect(fake.headers).toStrictEqual({})
+
+    await storage.read('key')
+
+    expect(fake.headers).toStrictEqual({
+      'X-Weaviate-Client-Integration': `strands-typescript/${integrationVersion()}`,
+    })
+  })
+
+  it('reads the version from package.json', () => {
+    expect(integrationVersion()).toBe(packageJson.version)
+  })
+
+  it('leaves a client without connection details alone', async () => {
+    const client = { collections: new FakeClient().collections } as unknown as WeaviateClient
+
+    await expect(new WeaviateStorage(client).read('key')).resolves.toBeNull()
   })
 })
 

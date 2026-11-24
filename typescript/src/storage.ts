@@ -25,6 +25,7 @@ import { StorageError, type Storage } from '@strands-agents/sdk'
 import type { Embedder, StorageSearchResult } from '@strands-agents/sdk/storage/search'
 import { Filters, configure, type Collection, type FilterValue, type WeaviateClient } from 'weaviate-client'
 import { keyUuid, normalizeKey, normalizePrefix, scopePrefix } from './keys.js'
+import { registerIntegration } from './telemetry.js'
 
 /** How `search()` queries Weaviate. */
 export type WeaviateSearchMode = 'hybrid' | 'vector' | 'bm25'
@@ -517,6 +518,8 @@ export class WeaviateStorage implements Storage {
 
   /** Creates the collection if needed and checks that its schema fits this backend. */
   private async _openCollection(multiTenant: boolean): Promise<Collection> {
+    // Before the first request, so every request this storage makes carries the header.
+    await registerIntegration(this._client)
     const name = this._collectionName
     const collections = this._client.collections
     if (!(await collections.exists(name))) {
