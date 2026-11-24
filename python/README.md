@@ -170,6 +170,13 @@ client.collections.create(
 )
 ```
 
+## Telemetry
+
+`WeaviateStorage` adds an `X-Weaviate-Client-Integration: strands-python/<version>` header to
+the client's requests, so Weaviate's usage telemetry can count this integration. It carries only
+the integration name and the installed `strands-weaviate` version. Weaviate servers report it
+only when their telemetry is enabled; set `DISABLE_TELEMETRY=true` on the server to turn that off.
+
 ## Limits
 
 - **Synchronous client only.** The SDK's synchronous entry points run storage calls on a new

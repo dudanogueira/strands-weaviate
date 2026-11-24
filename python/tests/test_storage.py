@@ -4,6 +4,7 @@ Tests that take the ``client`` fixture run against the in-memory fake and, under
 against a real Weaviate instance.
 """
 
+import importlib.metadata
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -28,6 +29,7 @@ from strands.vended_memory_stores import FileMemoryStore
 import strands_weaviate.storage as storage_module
 from strands_weaviate import WeaviateStorage
 from strands_weaviate._keys import key_uuid
+from strands_weaviate._telemetry import integration_version
 
 
 @pytest.fixture
@@ -498,6 +500,44 @@ class TestMultiTenancy:
         await storage.write("key", b"value")
 
         assert tenant_names(client, collection_name) == [tenant]
+
+
+class TestIntegrationHeader:
+    @pytest.fixture
+    def unconnected_client(self):
+        """A real client that is never connected, so its headers can be inspected offline."""
+        return weaviate.WeaviateClient(
+            connection_params=weaviate.connect.ConnectionParams.from_params(
+                http_host="localhost",
+                http_port=8080,
+                http_secure=False,
+                grpc_host="localhost",
+                grpc_port=50051,
+                grpc_secure=False,
+            ),
+            skip_init_checks=True,
+        )
+
+    def test_tags_http_and_grpc_requests(self, unconnected_client):
+        WeaviateStorage(unconnected_client)
+
+        expected = f"strands-python/{integration_version()}"
+        connection = unconnected_client._connection
+        assert connection._headers["X-Weaviate-Client-Integration"] == expected
+        assert ("x-weaviate-client-integration", expected) in connection.grpc_headers()
+
+    def test_falls_back_to_unknown_version(self, unconnected_client, monkeypatch):
+        def missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "version", missing)
+
+        WeaviateStorage(unconnected_client)
+
+        assert unconnected_client._connection._headers["X-Weaviate-Client-Integration"] == "strands-python/unknown"
+
+    def test_client_without_integrations_api_is_left_alone(self):
+        WeaviateStorage(FakeClient())
 
 
 class TestConfiguration:

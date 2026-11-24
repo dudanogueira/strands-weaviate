@@ -21,6 +21,7 @@ from weaviate.classes.data import DataObject
 from weaviate.classes.query import Filter, MetadataQuery
 
 from strands_weaviate._keys import key_uuid, normalize_key, normalize_prefix, scope_prefix
+from strands_weaviate._telemetry import register_integration
 
 if TYPE_CHECKING:
     from strands.storage.search import Embedder
@@ -141,6 +142,7 @@ class WeaviateStorage(Storage):
             raise ValueError(f"max_indexed_chars must be at least 1, got {max_indexed_chars}")
 
         self._client = client
+        register_integration(client)
         self._collection_name = collection_name
         self._prefix = scope_prefix(prefix)
         self._embedder = embedder

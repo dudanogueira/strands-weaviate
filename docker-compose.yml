@@ -12,3 +12,5 @@ services:
       PERSISTENCE_DATA_PATH: /var/lib/weaviate
       DEFAULT_VECTORIZER_MODULE: none
       CLUSTER_HOSTNAME: node1
+      # Test traffic is not real usage, so keep it out of Weaviate's telemetry.
+      DISABLE_TELEMETRY: "true"

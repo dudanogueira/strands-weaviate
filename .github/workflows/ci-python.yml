@@ -72,6 +72,7 @@ jobs:
           PERSISTENCE_DATA_PATH: /var/lib/weaviate
           DEFAULT_VECTORIZER_MODULE: none
           CLUSTER_HOSTNAME: node1
+          DISABLE_TELEMETRY: 'true'
 
     steps:
       - name: Checkout code
