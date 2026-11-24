@@ -10,12 +10,27 @@ an overwrite or delete can never leave a stale search entry behind.
 
 ## Install
 
+The package is not on PyPI yet. Install it from source, straight from GitHub:
+
 ```bash
-pip install strands-weaviate
+pip install "strands-weaviate @ git+https://github.com/dudanogueira/strands-weaviate.git#subdirectory=python"
 ```
 
+Add `@<branch-or-tag>` after `.git` to pin a version, for example
+`...strands-weaviate.git@python-v0.1.0#subdirectory=python`.
+
+Or from a local clone, as an editable install if you want to change the code:
+
+```bash
+git clone https://github.com/dudanogueira/strands-weaviate.git
+pip install -e strands-weaviate/python
+```
+
+In a `requirements.txt`, use the same `strands-weaviate @ git+https://...` line. In a
+`pyproject.toml`, add it to `dependencies` the same way.
+
 Requires Python 3.10+, `strands-agents>=1.64.0` and a Weaviate server reachable through the
-synchronous `weaviate-client` v4.
+synchronous `weaviate-client` v4. Both are installed as dependencies.
 
 ## Quickstart
 
@@ -217,9 +232,10 @@ Set `WEAVIATE_HTTP_PORT` and `WEAVIATE_GRPC_PORT` when Weaviate is not on 8080/5
 
 ## Publishing
 
-Create a GitHub release tagged `python-v<version>` (for example `python-v0.1.0`). The
-`publish-python.yml` workflow runs the checks, builds, and publishes through PyPI trusted
-publishing (environment `pypi`), which must be configured on PyPI first.
+Not published to PyPI yet. When it is: create a GitHub release tagged `python-v<version>` (for
+example `python-v0.1.0`). The `publish-python.yml` workflow runs the checks, builds, and
+publishes through PyPI trusted publishing (environment `pypi`), which must be configured on
+PyPI first.
 
 ## License
 
