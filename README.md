@@ -24,4 +24,4 @@ an official Weaviate or Strands Agents product.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+BSD 3-Clause. See [LICENSE](LICENSE).

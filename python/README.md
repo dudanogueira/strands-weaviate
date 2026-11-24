@@ -223,4 +223,4 @@ publishing (environment `pypi`), which must be configured on PyPI first.
 
 ## License
 
-Apache-2.0. See [LICENSE](../LICENSE).
+BSD 3-Clause. See [LICENSE](../LICENSE).
