@@ -231,4 +231,4 @@ The `publish-typescript.yml` workflow runs the checks, builds, and publishes wit
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+BSD 3-Clause. See [LICENSE](LICENSE).
