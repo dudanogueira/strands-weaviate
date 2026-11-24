@@ -8,7 +8,7 @@ Shows what the agent's memory retrieves: a Weaviate hybrid (keyword + vector) se
 import asyncio
 import sys
 
-from common import KNOWLEDGE_BASE, TENANT, connect, open_storage
+from common import KNOWLEDGE_BASE, connect, open_storage, where
 
 
 async def main(query: str) -> None:
@@ -17,7 +17,7 @@ async def main(query: str) -> None:
         knowledge = open_storage(client).namespace(f"memory/{KNOWLEDGE_BASE}")
         results = await knowledge.search(query)
         if not results:
-            print(f"No results in tenant '{TENANT}'. Run ingest.py first.")
+            print(f"No results in {where()}. Run ingest.py first.")
         for result in results:
             first_line = (result.data or b"").decode("utf-8").splitlines()[0]
             print(f"{result.score:.2f}  {result.key}\n      {first_line}")

@@ -2,7 +2,7 @@
 
     python ingest.py              # ingests ./content
     python ingest.py path/to/docs
-    TENANT=acme python ingest.py  # into another tenant
+    TENANT=acme python ingest.py  # into tenant acme, in a multi-tenant collection
 
 Running it again overwrites the same keys, so it is safe to re-run after editing the files.
 """
@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 
-from common import KNOWLEDGE_BASE, TENANT, connect, open_storage
+from common import KNOWLEDGE_BASE, connect, open_storage, where
 
 
 def sections(path: Path) -> list[tuple[str, str]]:
@@ -40,7 +40,7 @@ async def main(folder: Path) -> None:
                 await knowledge.write(key, text.encode("utf-8"))
                 count += 1
                 print(f"  stored {key}")
-        print(f"\nIngested {count} sections from {folder} into tenant '{TENANT}'.")
+        print(f"\nIngested {count} sections from {folder} into {where()}.")
     finally:
         client.close()
 

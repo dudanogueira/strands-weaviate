@@ -17,6 +17,8 @@ services:
       # Lets Weaviate call Ollama to embed text on write and on search.
       ENABLE_MODULES: text2vec-ollama
       CLUSTER_HOSTNAME: node1
+      # Set DISABLE_TELEMETRY=true to stop Weaviate sending usage telemetry.
+      DISABLE_TELEMETRY: "${DISABLE_TELEMETRY:-false}"
     volumes:
       - weaviate-data:/var/lib/weaviate
 

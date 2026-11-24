@@ -30,7 +30,7 @@ from strands import Agent, tool
 from strands.models.ollama import OllamaModel
 from strands.session import SnapshotSessionManager
 
-from common import CHAT_MODEL, COLLECTION, KNOWLEDGE_BASE, OLLAMA_URL, TENANT, connect, open_storage
+from common import CHAT_MODEL, KNOWLEDGE_BASE, OLLAMA_URL, connect, open_storage, where
 from tools import brew_ratio
 
 # Importing weaviate turns every warning category on, and the SDK's Ollama provider opens an
@@ -126,7 +126,7 @@ class Chat:
         )
         self.usage = {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}
         if show_debug:
-            debug(f"weaviate collection={COLLECTION} tenant={TENANT} session={SESSION_ID}")
+            debug(f"weaviate: {where()}, session={SESSION_ID}")
             debug(f"model={CHAT_MODEL} at {OLLAMA_URL}")
             debug(f"tools={self.agent.tool_names}")
             debug(f"system prompt: {SYSTEM_PROMPT}")
@@ -176,7 +176,7 @@ def main() -> None:
         if args.question:
             chat.ask(" ".join(args.question))
             return
-        print(f"Tenant '{TENANT}'. Ask about brewing, orders or subscriptions; an empty line quits.")
+        print(f"Using {where()}. Ask about brewing, orders or subscriptions; an empty line quits.")
         while question := input("\n> ").strip():
             chat.ask(question)
     except (EOFError, KeyboardInterrupt):

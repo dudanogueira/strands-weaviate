@@ -29,4 +29,7 @@ def brew_ratio(method: str, water_grams: float) -> str:
     if water_grams <= 0:
         return "The amount of water must be greater than zero."
     coffee_grams = water_grams / ratio
-    return f"Use {coffee_grams:.0f} grams of coffee for {water_grams:.0f} grams of water ({normalized}, 1 to {ratio:.1f})."
+    return (
+        f"Use {coffee_grams:.0f} grams of coffee for {water_grams:.0f} grams of water "
+        f"({normalized}, 1 to {ratio:.1f})."
+    )

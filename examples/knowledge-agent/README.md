@@ -84,7 +84,7 @@ python chat.py --debug "And how long should it steep?"
 ```
 
 ```
-[debug] weaviate collection=KnowledgeAgent tenant=default session=demo
+[debug] weaviate: KnowledgeAgent, session=demo
 [debug] tools=['search_handbook', 'brew_ratio']
 [debug] session restored with 4 earlier messages
 [debug] this turn added 4 messages:
@@ -120,16 +120,21 @@ recreate the stack with `docker compose down -v`.
 
 ## Tenants
 
-The collection is multi-tenant. Each tenant has its own handbook and its own chat sessions in
-a separate shard:
+By default everything goes into one plain collection, `KnowledgeAgent`. Set `TENANT` to give
+each tenant its own handbook and chat sessions, in a separate shard:
 
 ```bash
 TENANT=acme python ingest.py path/to/acme-docs
 TENANT=acme python chat.py
 ```
 
-A tenant is created by its first ingest. Searching or chatting as a tenant with no data
-returns nothing and does not create it.
+Tenants live in a separate multi-tenant collection, `KnowledgeAgentTenants`, because Weaviate
+fixes multi-tenancy when a collection is created. A tenant is created by its first ingest.
+Searching or chatting as a tenant with no data returns nothing and does not create it.
+
+If a collection exists in the other mode (for example `KnowledgeAgent` from an earlier
+version of this example, which was always multi-tenant), the scripts say so and stop. Set
+`WEAVIATE_COLLECTION` to a new name, or run `docker compose down -v` to start over.
 
 ## Settings
 
@@ -137,7 +142,7 @@ All optional, read from the environment:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TENANT` | `default` | Tenant to ingest into and chat as |
+| `TENANT` | unset | Tenant to ingest into and chat as; unset uses a single-tenant collection |
 | `SESSION_ID` | `demo` | Conversation to continue in `chat.py` |
 | `CHAT_MODEL` | `llama3.2` | Ollama model the agent uses |
 | `EMBED_MODEL` | `nomic-embed-text` | Ollama model Weaviate embeds with (fixed at collection creation) |
@@ -145,13 +150,15 @@ All optional, read from the environment:
 | `WEAVIATE_OLLAMA_URL` | `http://ollama:11434` | Ollama as the Weaviate container reaches it |
 | `WEAVIATE_HTTP_PORT`, `WEAVIATE_GRPC_PORT` | `8080`, `50051` | Weaviate ports, for compose and the scripts |
 | `OLLAMA_PORT` | `11434` | Host port of the compose Ollama |
-| `WEAVIATE_COLLECTION` | `KnowledgeAgent` | Collection name |
+| `WEAVIATE_COLLECTION` | `KnowledgeAgent`, or `KnowledgeAgentTenants` with `TENANT` | Collection name |
+| `DISABLE_TELEMETRY` | `false` | Set to `true` to stop the compose Weaviate sending usage telemetry |
 
 ## How it uses the integration
 
 - [`common.py`](common.py) creates the collection from `WeaviateStorage.collection_properties()`
-  with Weaviate's Ollama vectorizer and multi-tenancy, and opens a `WeaviateStorage` for the
-  tenant. `index_prefixes=["memory/"]` keeps session snapshots out of the search index.
+  with Weaviate's Ollama vectorizer (and multi-tenancy when `TENANT` is set), and opens a
+  `WeaviateStorage`. `index_prefixes=["memory/"]` keeps session snapshots out of the search
+  index.
 - [`ingest.py`](ingest.py) writes each section with `storage.write()` under `memory/handbook/`.
 - [`chat.py`](chat.py) wraps `storage.search()` in the `search_handbook` tool and gives the
   same storage to a `SnapshotSessionManager` for the conversation.
