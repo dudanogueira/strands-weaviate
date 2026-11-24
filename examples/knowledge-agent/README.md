@@ -64,7 +64,13 @@ python chat.py "How much coffee do I need for 600 grams of water with pour-over?
 python chat.py          # interactive
 ```
 
-The first question is answered from the handbook, the second with the calculator.
+The first question is answered from the handbook, the second with the calculator. Each tool
+call is shown above the answer:
+
+```
+  -> brew_ratio(method="pour-over", water_grams=600)
+For a pour-over, use 36 grams of coffee for 600 grams of water.
+```
 
 The conversation is saved in Weaviate, so the next run continues it. Set `SESSION_ID` to start
 a separate conversation.

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 
 from strands import Agent, tool
 from strands.models.ollama import OllamaModel
@@ -31,6 +32,11 @@ from strands.session import SnapshotSessionManager
 
 from common import CHAT_MODEL, COLLECTION, KNOWLEDGE_BASE, OLLAMA_URL, TENANT, connect, open_storage
 from tools import brew_ratio
+
+# Importing weaviate turns every warning category on, and the SDK's Ollama provider opens an
+# HTTP client per model call without closing it, so Python would report each of those sockets
+# as unclosed when the script exits. The OS closes them at exit; hide the noise.
+warnings.simplefilter("ignore", ResourceWarning)
 
 SESSION_ID = os.environ.get("SESSION_ID", "demo")
 
@@ -42,6 +48,26 @@ SYSTEM_PROMPT = (
     "customer in plain sentences using only what the tool returned. If the handbook does not "
     "contain the answer, say you do not know."
 )
+
+
+def dim(text: str) -> str:
+    """Grey out secondary output when writing to a terminal."""
+    return f"\033[2m{text}\033[0m" if sys.stdout.isatty() else text
+
+
+def show_progress(**event) -> None:
+    """Stream the answer as it is generated, and show each tool call with its arguments."""
+    if text := event.get("data"):
+        print(text, end="", flush=True)
+    message = event.get("message")
+    if message and message["role"] == "assistant":
+        if any("text" in block for block in message["content"]):
+            print()  # ends the line of text streamed above
+        for block in message["content"]:
+            if "toolUse" in block:
+                tool_use = block["toolUse"]
+                arguments = ", ".join(f"{name}={json.dumps(value)}" for name, value in tool_use["input"].items())
+                print(dim(f"  -> {tool_use['name']}({arguments})"))
 
 
 def debug(text: str = "") -> None:
@@ -81,7 +107,8 @@ class Chat:
             Args:
                 query: The customer's question, or the topic to look up.
             """
-            results = await knowledge.search(query)
+            # The two best sections are enough context, and keep a small model on topic.
+            results = (await knowledge.search(query))[:2]
             if not results:
                 return "The handbook has no entry about this."
             return "\n\n---\n\n".join((result.data or b"").decode("utf-8").strip() for result in results)
@@ -94,6 +121,7 @@ class Chat:
             model=OllamaModel(OLLAMA_URL, model_id=CHAT_MODEL),
             system_prompt=SYSTEM_PROMPT,
             tools=[search_handbook, brew_ratio],
+            callback_handler=show_progress,
             session_manager=SnapshotSessionManager(session_id=SESSION_ID, storage=self.storage),
         )
         self.usage = {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}
@@ -107,7 +135,6 @@ class Chat:
     def ask(self, question: str) -> None:
         before = len(self.agent.messages)
         result = self.agent(question)
-        print()
         if self.show_debug:
             self._debug_turn(result, before)
 
