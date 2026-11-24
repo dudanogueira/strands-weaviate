@@ -10,12 +10,28 @@ an overwrite or delete can never leave a stale search entry behind.
 
 ## Install
 
+The package is not on npm yet. Build it from source and install the packed tarball. npm cannot
+install a package from a subfolder of a git repository, so this goes through a local clone:
+
 ```bash
-npm install strands-weaviate @strands-agents/sdk weaviate-client
+git clone https://github.com/dudanogueira/strands-weaviate.git
+cd strands-weaviate/typescript
+npm ci
+npm pack            # builds dist/ and writes strands-weaviate-<version>.tgz
 ```
 
-Requires Node.js 22+, `@strands-agents/sdk` 1.25+ and `weaviate-client` 3.15.3+ (both peer
-dependencies).
+Then, in your project:
+
+```bash
+npm install /path/to/strands-weaviate/typescript/strands-weaviate-0.0.0.tgz \
+  @strands-agents/sdk weaviate-client
+```
+
+`@strands-agents/sdk` and `weaviate-client` are peer dependencies, so install them alongside.
+The tarball path is recorded in your `package.json`; re-run `npm pack` and `npm install` with
+the same path to pick up changes.
+
+Requires Node.js 22+, `@strands-agents/sdk` 1.25+ and `weaviate-client` 3.15.3+.
 
 ## Quickstart
 
@@ -225,7 +241,7 @@ Set `WEAVIATE_HTTP_PORT` and `WEAVIATE_GRPC_PORT` when Weaviate is not on 8080/5
 
 ## Publishing
 
-Bump `version` in `package.json`, then create a GitHub release tagged `typescript-v<version>`.
+Not published to npm yet. When it is: bump `version` in `package.json`, then create a GitHub release tagged `typescript-v<version>`.
 The `publish-typescript.yml` workflow runs the checks, builds, and publishes with the
 `NPM_TOKEN` secret of the `npm` environment, which must be configured first.
 
